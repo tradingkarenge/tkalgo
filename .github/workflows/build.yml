@@ -1,0 +1,27 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install python-socketio[client] requests cryptography websocket-client dhanhq kiteconnect smartapi-python upstox-python-sdk fyers-apiv3 neo-api-client
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --windowed --clean --name TKAlgoClient client_app.py
+      - name: Zip the .app bundle
+        run: zip -r TKAlgoClient-macOS.zip dist/TKAlgoClient.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TKAlgoClient-macOS
+          path: TKAlgoClient-macOS.zip
