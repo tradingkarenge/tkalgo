@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pyinstaller
-          pip install python-socketio[client] requests cryptography websocket-client dhanhq kiteconnect smartapi-python upstox-python-sdk fyers-apiv3 neo-api-client
+          pip install python-socketio[client] requests cryptography websocket-client dhanhq kiteconnect smartapi-python upstox-python-sdk fyers-apiv3
       - name: Build with PyInstaller
         run: pyinstaller --onefile --windowed --clean --name TKAlgoClient client_app.py
       - name: Zip the .app bundle
