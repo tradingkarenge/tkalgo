@@ -44,12 +44,8 @@ def fyers_app_id(acc):
     return acc.get("api_key", "").strip()
 
 def fyers_token(acc):
-    app_id = fyers_app_id(acc)
     raw = acc.get("access_token", "").strip()
-    if not app_id: return raw
-    if raw.startswith(app_id + ":"): return raw
-    if ":" in raw: raw = raw.split(":", 1)[-1]
-    return f"{app_id}:{raw}"
+    return raw
 
 def fyers_model(acc):
     from fyers_apiv3 import fyersModel
@@ -95,26 +91,59 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     return resp
 
 def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
+    import requests
     from kiteconnect import KiteConnect
+
     kite = KiteConnect(api_key=acc["api_key"])
     kite.set_access_token(acc["access_token"])
-    # sym lookup is handled on server or can be rebuilt here
-    d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-    sym = f"NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
-    # Note: sym might need adjustment based on Zerodha's specific mapping
-    # For now using generic format; if Master sends 'tradingsymbol' it's better
-    tradingsymbol = acc.get("tradingsymbol") or sym
-    resp = kite.place_order(
-        variety="regular",
-        exchange="NFO",
-        tradingsymbol=tradingsymbol,
-        transaction_type=tx,
-        quantity=acc["quantity"],
-        order_type="MARKET",
-        product="MIS",
-    )
-    log.info(f"Zerodha resp: {resp}")
-    return resp
+
+    expiry_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
+    instruments = kite.instruments("NFO")
+    sym = None
+    for inst in instruments:
+        if (inst["instrument_type"] == opt_type and
+            inst["strike"] == int(strike) and
+            inst["expiry"] == expiry_date and
+            inst["name"] == "NIFTY"):
+            sym = inst["tradingsymbol"]
+            break
+    if not sym:
+        log.error(f"Instrument not found for strike {strike}")
+        return
+
+    # Prepare the order payload for the HTTP API
+    order_data = {
+        "variety": "regular",
+        "exchange": "NFO",
+        "tradingsymbol": sym,
+        "transaction_type": tx,
+        "quantity": acc["quantity"],
+        "order_type": "MARKET",
+        "product": "NRML",
+        "validity": "DAY",
+        "tag": "TKALGO",
+        "market_protection": -1  # <-- Use -1 for auto-protection
+    }
+
+    # Make the raw HTTP request to the correct Kite API endpoint
+    base_url = "https://api.kite.trade"
+    endpoint = "/orders/regular"
+    url = base_url + endpoint
+
+    headers = {
+        "X-Kite-Version": "3",
+        "Authorization": f"token {acc['api_key']}:{acc['access_token']}"
+    }
+
+    response = requests.post(url, data=order_data, headers=headers)
+
+    # Log the response
+    log.info(f"Zerodha order response: {response.status_code} - {response.text}")
+
+    if response.status_code != 200:
+        log.error(f"Order placement failed: {response.text}")
+    else:
+        log.info("Order placed successfully")
 
 def place_order_angel(acc, tx, strike, opt_type, ltp, expiry):
     from SmartApi import SmartConnect
@@ -163,7 +192,7 @@ def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry):
 def place_order_fyers(acc, tx, strike, opt_type, ltp, expiry):
     fy = fyers_model(acc)
     d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-    sym = f"NSE:NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
+    sym = f"NSE:NIFTY{d.strftime('%y')}{d.month}{d.strftime('%d')}{int(strike)}{opt_type}"
     data = {
         "symbol": sym, "qty": acc["quantity"], "type": 2,
         "side": 1 if tx == "BUY" else -1, "productType": "INTRADAY",
