@@ -1,21 +1,3 @@
-"""
-TK ALGO — Member Client App  v1.0
-Runs on the MEMBER's local machine (their home Wi-Fi IP).
-
-How it works:
-  1. Member enters their License Key once.
-  2. App detects hardware ID and registers with Master Server.
-  3. When a trade alert arrives, the app requests a one-time execution token.
-  4. Master Server validates quota and pushes back the encrypted account credentials.
-  5. This app decrypts them, places the trade from the LOCAL machine IP, then clears memory.
-
-Compile to .exe:
-    pyinstaller --onefile --console --name TKAlgoClient client_app.py
-
-Install deps:
-    pip install python-socketio[client] requests cryptography websocket-client dhanhq kiteconnect smartapi-python upstox-python-sdk fyers-apiv3 neo-api-client
-"""
-
 import json
 import time
 import logging
@@ -28,23 +10,40 @@ import tempfile
 
 from tkalgo_security import decrypt_payload, get_hwid
 
-# ── Config — hardcoded into the binary at compile time ───────────────────────
-MASTER_URL = "http://198.23.237.249:5050"
+MASTER_URL  = "http://198.23.237.249:5050"
+WEBHOOK_URL = "http://198.23.237.249:5000"
 CURRENT_VERSION = "1.0.0"
+
+class AsciiStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            msg = (msg.replace('\u2713','[OK]').replace('\u2717','[FAIL]')
+                      .replace('\u2705','[OK]').replace('\u274c','[FAIL]')
+                      .replace('\u26a0','[WARN]').replace('\u23f3','[WAIT]'))
+            self.stream.write(msg + self.terminator)
+            self.flush()
+        except Exception:
+            self.handleError(record)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-5s | %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        AsciiStreamHandler(),
+        logging.FileHandler("tkalgo_client.log", encoding="utf-8")
+    ]
 )
 log = logging.getLogger("TKAlgoClient")
 
-# ── FYERS helpers ──────────────────────────────────────────────────────────
 def fyers_app_id(acc):
     return acc.get("api_key", "").strip()
 
 def fyers_token(acc):
     raw = acc.get("access_token", "").strip()
+    if ":" in raw:
+        raw = raw.split(":", 1)[-1]
     return raw
 
 def fyers_model(acc):
@@ -56,7 +55,6 @@ def fyers_model(acc):
         log_path=tempfile.gettempdir()
     )
 
-# ── GROWW helpers ──────────────────────────────────────────────────────────
 _GROWW_MONTH = {1:"1",2:"2",3:"3",4:"4",5:"5",6:"6",
                 7:"7",8:"8",9:"9",10:"O",11:"N",12:"D"}
 def build_groww_symbol(strike, opt_type, expiry):
@@ -67,13 +65,9 @@ def build_groww_symbol(strike, opt_type, expiry):
 def groww_ref_id():
     return f"TK{str(int(time.time()))[-8:]}"
 
-# ── Broker execution handlers ───────────────────────────────────────────────
-
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
     dhan = dhanhq(acc["client_id"], acc["access_token"])
-    # We expect security_id to be passed in the account dict if available, 
-    # but more robustly the Master should have resolved it.
     sid = acc.get("security_id")
     if not sid:
         log.error("Dhan: security_id missing in payload")
@@ -91,59 +85,31 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     return resp
 
 def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
-    import requests
     from kiteconnect import KiteConnect
-
     kite = KiteConnect(api_key=acc["api_key"])
     kite.set_access_token(acc["access_token"])
-
     expiry_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
     instruments = kite.instruments("NFO")
     sym = None
     for inst in instruments:
         if (inst["instrument_type"] == opt_type and
-            inst["strike"] == int(strike) and
-            inst["expiry"] == expiry_date and
-            inst["name"] == "NIFTY"):
+                inst["strike"] == int(strike) and
+                inst["expiry"] == expiry_date and
+                inst["name"] == "NIFTY"):
             sym = inst["tradingsymbol"]
             break
     if not sym:
-        log.error(f"Instrument not found for strike {strike}")
+        log.error(f"Zerodha: instrument not found for strike {strike}")
         return
-
-    # Prepare the order payload for the HTTP API
+    headers = {"X-Kite-Version": "3",
+               "Authorization": f"token {acc['api_key']}:{acc['access_token']}"}
     order_data = {
-        "variety": "regular",
-        "exchange": "NFO",
-        "tradingsymbol": sym,
-        "transaction_type": tx,
-        "quantity": acc["quantity"],
-        "order_type": "MARKET",
-        "product": "NRML",
-        "validity": "DAY",
-        "tag": "TKALGO",
-        "market_protection": -1  # <-- Use -1 for auto-protection
+        "variety": "regular", "exchange": "NFO", "tradingsymbol": sym,
+        "transaction_type": tx, "quantity": acc["quantity"],
+        "order_type": "MARKET", "product": "NRML", "validity": "DAY", "tag": "TKALGO"
     }
-
-    # Make the raw HTTP request to the correct Kite API endpoint
-    base_url = "https://api.kite.trade"
-    endpoint = "/orders/regular"
-    url = base_url + endpoint
-
-    headers = {
-        "X-Kite-Version": "3",
-        "Authorization": f"token {acc['api_key']}:{acc['access_token']}"
-    }
-
-    response = requests.post(url, data=order_data, headers=headers)
-
-    # Log the response
-    log.info(f"Zerodha order response: {response.status_code} - {response.text}")
-
-    if response.status_code != 200:
-        log.error(f"Order placement failed: {response.text}")
-    else:
-        log.info("Order placed successfully")
+    r = requests.post("https://api.kite.trade/orders/regular", data=order_data, headers=headers)
+    log.info(f"Zerodha resp: {r.status_code} - {r.text}")
 
 def place_order_angel(acc, tx, strike, opt_type, ltp, expiry):
     from SmartApi import SmartConnect
@@ -153,19 +119,13 @@ def place_order_angel(acc, tx, strike, opt_type, ltp, expiry):
     symbol = f"NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
     token = acc.get("symbol_token")
     if not token:
-        log.error("Angel: symbol_token missing in payload")
+        log.error("Angel: symbol_token missing")
         return
     resp = smart.placeOrder({
-        "variety": "NORMAL",
-        "tradingsymbol": symbol,
-        "symboltoken": token,
-        "transactiontype": tx,
-        "exchange": "NFO",
-        "ordertype": "MARKET",
-        "producttype": "INTRADAY",
-        "duration": "DAY",
-        "price": "0",
-        "quantity": str(acc["quantity"]),
+        "variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token,
+        "transactiontype": tx, "exchange": "NFO", "ordertype": "MARKET",
+        "producttype": "INTRADAY", "duration": "DAY",
+        "price": "0", "quantity": str(acc["quantity"]),
     })
     log.info(f"Angel resp: {resp}")
     return resp
@@ -174,7 +134,7 @@ def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry):
     import upstox_client
     inst_key = acc.get("instrument_token")
     if not inst_key:
-        log.error("Upstox: instrument_token missing in payload")
+        log.error("Upstox: instrument_token missing")
         return
     cfg = upstox_client.Configuration()
     cfg.access_token = acc["access_token"]
@@ -205,12 +165,12 @@ def place_order_fyers(acc, tx, strike, opt_type, ltp, expiry):
 
 def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     sym = build_groww_symbol(strike, opt_type, expiry)
-    headers = {"Authorization": f"Bearer {acc['access_token']}", "Content-Type": "application/json",
-               "Accept": "application/json", "X-API-VERSION": "1.0"}
+    headers = {"Authorization": f"Bearer {acc['access_token']}",
+               "Content-Type": "application/json", "Accept": "application/json",
+               "X-API-VERSION": "1.0"}
     payload = {"trading_symbol": sym, "quantity": acc["quantity"], "price": 0,
                "trigger_price": 0, "validity": "DAY", "exchange": "NSE", "segment": "FNO",
-               "product": "MIS", "order_type": "MARKET",
-               "transaction_type": tx,
+               "product": "MIS", "order_type": "MARKET", "transaction_type": tx,
                "order_reference_id": groww_ref_id()}
     resp = requests.post("https://api.groww.in/v1/order/create", json=payload, headers=headers, timeout=10)
     log.info(f"Groww resp: {resp.status_code} {resp.text}")
@@ -218,10 +178,8 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
 
 def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry):
     from neo_api_client import NeoAPI
-    client = NeoAPI(consumer_key=acc.get("api_key", ""),
-                    environment="prod",
-                    access_token=acc.get("access_token", ""),
-                    neo_fin_key="neotradeapi")
+    client = NeoAPI(consumer_key=acc.get("api_key", ""), environment="prod",
+                    access_token=acc.get("access_token", ""), neo_fin_key="neotradeapi")
     d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
     sym = f"NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
     resp = client.place_order(exchange_segment="nse_fo", product="MIS", price="0",
@@ -234,95 +192,70 @@ def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry):
     return resp
 
 def place_order_aliceblue(acc, tx, strike, opt_type, ltp, expiry):
-    # Payload must include symbol_id (token) and tsym
+    import hashlib
     token = acc.get("symbol_token")
-    tsym = acc.get("tradingsymbol")
+    tsym  = acc.get("tradingsymbol")
     if not token or not tsym:
-        log.error("AliceBlue: token/tsym missing in payload")
+        log.error("AliceBlue: token/tsym missing")
         return
-    
-    def _alice_susertoken(session_id):
-        import hashlib
-        h1 = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-        return hashlib.sha256(h1.encode("utf-8")).hexdigest()
-
-    uid = acc["client_id"]
-    tok = _alice_susertoken(acc["access_token"])
-    headers = {
-        "Authorization": f"Bearer {uid} {tok}",
-        "Content-Type": "application/json"
-    }
-    order_body = [{
-        "complexty": "regular", "discqty": "0", "exch": "NFO", "pCode": "MIS",
-        "prctyp": "MKT", "price": "0", "qty": str(acc["quantity"]), "ret": "DAY",
-        "symbol_id": token, "trading_symbol": tsym,
-        "transtype": tx, "trigPrice": "0", "orderTag": "TKALGO"
-    }]
-    resp = requests.post("https://ant.aliceblueonline.com/rest/AliceBlueAPIService/api/placeOrder/executePlaceOrder", 
-                         json=order_body, headers=headers, timeout=10)
+    h1  = hashlib.sha256(acc["access_token"].encode()).hexdigest()
+    tok = hashlib.sha256(h1.encode()).hexdigest()
+    headers = {"Authorization": f"Bearer {acc['client_id']} {tok}",
+               "Content-Type": "application/json"}
+    order_body = [{"complexty": "regular", "discqty": "0", "exch": "NFO", "pCode": "MIS",
+                   "prctyp": "MKT", "price": "0", "qty": str(acc["quantity"]), "ret": "DAY",
+                   "symbol_id": token, "trading_symbol": tsym,
+                   "transtype": tx, "trigPrice": "0", "orderTag": "TKALGO"}]
+    resp = requests.post(
+        "https://ant.aliceblueonline.com/rest/AliceBlueAPIService/api/placeOrder/executePlaceOrder",
+        json=order_body, headers=headers, timeout=10)
     log.info(f"AliceBlue resp: {resp.status_code} {resp.text}")
     return resp.json()
 
 def place_order_flattrade(acc, tx, strike, opt_type, ltp, expiry):
     d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
     tsym = f"NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
-    uid = acc["client_id"]
-    payload = {
-        "uid": uid, "actid": uid, "exch": "NFO", "tsym": tsym,
-        "qty": str(acc["quantity"]), "prc": "0", "prd": "I",
-        "trantype": "B" if tx == "BUY" else "S", "prctyp": "MKT", "ret": "DAY"
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    resp = requests.post("https://piconnect.flattrade.in/NorenWClientTP/PlaceOrder", 
-                         data={"jData": json.dumps(payload)}, headers=headers, timeout=10)
+    uid  = acc["client_id"]
+    payload = {"uid": uid, "actid": uid, "exch": "NFO", "tsym": tsym,
+               "qty": str(acc["quantity"]), "prc": "0", "prd": "I",
+               "trantype": "B" if tx == "BUY" else "S", "prctyp": "MKT", "ret": "DAY"}
+    resp = requests.post("https://piconnect.flattrade.in/NorenWClientTP/PlaceOrder",
+                         data={"jData": json.dumps(payload)},
+                         headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=10)
     log.info(f"FlatTrade resp: {resp.status_code} {resp.text}")
     return resp.json()
 
 def place_order_iifl(acc, tx, strike, opt_type, ltp, expiry):
-    headers = {"Authorization": f"Bearer {acc['access_token']}", "Content-Type": "application/json"}
     inst_id = acc.get("instrument_id")
     if not inst_id:
-        log.error("IIFL: instrument_id missing in payload")
+        log.error("IIFL: instrument_id missing")
         return
-    
-    # Robust price calculation
-    limit_price = 0.0
-    if ltp > 0:
-        limit_price = round(ltp * 1.05, 2) if tx == "BUY" else round(ltp * 0.90, 2)
-    else:
-        # Fallback if LTP is not available
-        limit_price = 9999.0 if tx == "BUY" else 1.05
-
-    payload = [{
-        "exchange": "NSEFO", "instrumentId": str(inst_id),
-        "transactionType": tx, "quantity": acc["quantity"],
-        "product": "INTRADAY", "orderComplexity": "REGULAR",
-        "orderType": "LIMIT", "validity": "DAY", "price": str(limit_price)
-    }]
-    r = requests.post("https://api.iiflcapital.com/v1/orders", json=payload, headers=headers, timeout=10)
+    limit_price = (round(ltp * 1.05, 2) if tx == "BUY" and ltp > 0 else
+                   round(ltp * 0.90, 2) if ltp > 0 else
+                   9999.0 if tx == "BUY" else 1.05)
+    payload = [{"exchange": "NSEFO", "instrumentId": str(inst_id),
+                "transactionType": tx, "quantity": acc["quantity"],
+                "product": "INTRADAY", "orderComplexity": "REGULAR",
+                "orderType": "LIMIT", "validity": "DAY", "price": str(limit_price)}]
+    r = requests.post("https://api.iiflcapital.com/v1/orders", json=payload,
+                      headers={"Authorization": f"Bearer {acc['access_token']}",
+                               "Content-Type": "application/json"}, timeout=10)
     log.info(f"IIFL resp: {r.status_code} {r.text}")
     return r.json()
 
 BROKER_HANDLERS = {
-    "dhan": place_order_dhan,
-    "zerodha": place_order_zerodha,
-    "angel": place_order_angel,
-    "upstox": place_order_upstox,
-    "fyers": place_order_fyers,
-    "groww": place_order_groww,
-    "kotak": place_order_kotak,
-    "aliceblue": place_order_aliceblue,
-    "flattrade": place_order_flattrade,
-    "iifl": place_order_iifl,
+    "dhan": place_order_dhan, "zerodha": place_order_zerodha,
+    "angel": place_order_angel, "upstox": place_order_upstox,
+    "fyers": place_order_fyers, "groww": place_order_groww,
+    "kotak": place_order_kotak, "aliceblue": place_order_aliceblue,
+    "flattrade": place_order_flattrade, "iifl": place_order_iifl,
 }
 
 def execute_trade(encrypted_payload: str):
-    """Full execution pipeline from decryption → broker order."""
-    data = decrypt_payload(encrypted_payload, max_age=10.0) # increased age to 10s for slow networks
+    data = decrypt_payload(encrypted_payload, max_age=10.0)
     if "error" in data:
         log.error(f"Execution blocked: {data['error']}")
         return
-
     acc    = data.get("account", {})
     action = data.get("action", "BUY").upper()
     strike = int(data.get("strike", 0))
@@ -330,21 +263,38 @@ def execute_trade(encrypted_payload: str):
     expiry = data.get("expiry", "")
     ltp    = float(data.get("ltp", 0))
     broker = acc.get("broker", "").lower().strip()
-
+    log.info(f"[EXECUTE] {action} {opt}{strike} @ {ltp} | broker={broker}")
     handler = BROKER_HANDLERS.get(broker)
     if not handler:
         log.error(f"Unknown broker in payload: '{broker}'")
         return
-
     try:
         handler(acc, action, strike, opt, ltp, expiry)
     except Exception as err:
         log.error(f"Trade execution error [{broker}]: {err}")
     finally:
-        # Immediately wipe sensitive token from memory
         acc.clear()
 
-# ── Socket.IO Client ──────────────────────────────────────────────────────────
+def fetch_execution_logs(n=20):
+    try:
+        r = requests.get(f"{WEBHOOK_URL}/execution_logs", timeout=5)
+        if r.ok:
+            logs = r.json().get("logs", [])
+            if not logs:
+                print("\n  [No execution logs yet]")
+                return
+            print(f"\n{'─'*72}")
+            print(f"  {'TIME':<10} {'NAME':<14} {'ACTION':<18} {'STATUS':<8} DETAIL")
+            print(f"{'─'*72}")
+            for l in logs[:n]:
+                print(f"  {l.get('time',''):<10} {l.get('name',''):<14} "
+                      f"{l.get('action',''):<18} {l.get('status',''):<8} "
+                      f"{l.get('detail','')[:38]}")
+            print(f"{'─'*72}")
+        else:
+            print(f"\n[FAIL] Could not fetch logs: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"\n[FAIL] Logs unavailable: {e}")
 
 sio_client = socketio.Client(reconnection=True, reconnection_attempts=999, reconnection_delay=3)
 _license_key = ""
@@ -358,20 +308,28 @@ def connect():
 @sio_client.event
 def disconnect():
     log.warning("Disconnected from Master Server. Retrying...")
+    print("\n[WARN] Connection lost. Reconnecting...")
 
 @sio_client.on("auth_result")
 def on_auth_result(data):
     if data.get("ok"):
-        log.info(f"✓ Authenticated as: {data.get('name')}")
+        name = data.get("name")
+        log.info(f"[OK] Authenticated as: {name}")
+        sio_client.auth_name = name
+        print("\n[SIGNAL] Connected. Waiting for trade alerts...")
     else:
-        log.error(f"✗ Auth rejected: {data.get('reason')}")
+        log.error(f"[FAIL] Auth rejected: {data.get('reason')}")
         sio_client.disconnect()
 
 @sio_client.on("trade_alert")
 def on_trade_alert(data):
     signal_id     = data.get("signal_id")
     account_names = data.get("account_names", [])
-    log.info(f"Trade alert received! Signal={signal_id} | {data.get('action')} {data.get('strike')}{data.get('opt_type')}")
+    sio_client.last_alert_time = datetime.datetime.now().strftime("%H:%M:%S")
+    log.info(f"[ALERT] Signal={signal_id} | {data.get('action')} "
+             f"{data.get('strike')}{data.get('opt_type')} @ {data.get('ltp')}")
+    print(f"\n[ALERT] {data.get('action')} {data.get('strike')}{data.get('opt_type')} "
+          f"@ {data.get('ltp')} | Signal={signal_id}")
     for acc_name in account_names:
         sio_client.emit("request_execution_token", {
             "signal_id": signal_id,
@@ -386,10 +344,57 @@ def on_execution_token(data):
     payload = data.get("payload")
     threading.Thread(target=execute_trade, args=(payload,), daemon=True).start()
 
-# ── Entry Point ───────────────────────────────────────────────────────────────
+@sio_client.on("update_token_result")
+def on_update_token_result(data):
+    if data.get("ok"):
+        print(f"\n[OK] {data.get('message', 'Token saved.')}")
+    else:
+        print(f"\n[FAIL] {data.get('reason', 'Unknown error')}")
+
+@sio_client.on("test_signal_result")
+def on_test_signal_result(data):
+    if data.get("ok"):
+        print(f"\n[OK] Test signal sent: {data.get('message')}")
+    else:
+        print(f"\n[FAIL] Test failed: {data.get('reason')}")
+
+def handle_user_input():
+    menu = "\nOptions: [1] Update Token  [2] Test Signal  [3] Logs  [4] Status"
+    while True:
+        print(menu)
+        cmd = input("> ").strip()
+
+        if cmd in ("1", "token"):
+            new_token = input("Enter new access token: ").strip()
+            if not new_token:
+                print("No token entered.")
+                continue
+            sio_client.emit("update_token", {
+                "license_key": _license_key,
+                "access_token": new_token
+            })
+            print("[OK] Token sent. Waiting for confirmation...")
+
+        elif cmd in ("2", "test"):
+            print("Sending test signal to master...")
+            sio_client.emit("test_signal", {"license_key": _license_key})
+
+        elif cmd in ("3", "logs"):
+            raw = input("How many logs? [default 20]: ").strip()
+            n = int(raw) if raw.isdigit() else 20
+            fetch_execution_logs(n)
+
+        elif cmd in ("4", "status"):
+            print(f"\n{'─'*40}")
+            print(f"  Connected : {sio_client.connected}")
+            print(f"  User      : {getattr(sio_client, 'auth_name', 'Unknown')}")
+            print(f"  Last alert: {getattr(sio_client, 'last_alert_time', 'Never')}")
+            print(f"{'─'*40}")
+
+        else:
+            print("Unknown. Enter 1, 2, 3, or 4.")
 
 def check_for_updates():
-    """Checks the Master Server for the latest official version."""
     try:
         r = requests.get(f"{MASTER_URL}/check_update", timeout=5)
         if r.status_code == 200:
@@ -400,29 +405,23 @@ def check_for_updates():
                 print(f"      NEW UPDATE AVAILABLE: v{latest}")
                 print(f"      Download from: {data.get('url')}")
                 print("!" * 50 + "\n")
-                log.warning(f"Your version (v{CURRENT_VERSION}) is outdated. Please update to v{latest}.")
-                return True
     except Exception as e:
         log.debug(f"Update check failed: {e}")
-    return False
 
 def main():
     global _license_key
-
-    # Early update check
     check_for_updates()
-
     print("\n" + "=" * 50)
-    print(f"    TK ALGO — Member Client App v{CURRENT_VERSION}")
+    print(f"    TK ALGO -- Member Client App v{CURRENT_VERSION}")
     print("=" * 50)
     _license_key = input("\nEnter your License Key: ").strip()
     if not _license_key:
         print("No license key entered. Exiting.")
         return
-
     log.info(f"Connecting to {MASTER_URL} ...")
     try:
         sio_client.connect(MASTER_URL, transports=["websocket"])
+        threading.Thread(target=handle_user_input, daemon=True).start()
         sio_client.wait()
     except KeyboardInterrupt:
         log.info("Shutting down.")
