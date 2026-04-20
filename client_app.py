@@ -68,12 +68,36 @@ def groww_ref_id():
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
     dhan = dhanhq(acc["client_id"], acc["access_token"])
+    
+    # 1. Try direct lookup from payload or instrument_map
     sid = acc.get("security_id")
     if not sid:
-        log.error("Dhan: security_id missing in payload")
+        sid = instrument_map.get(f"{int(strike)}_{expiry}_{opt_type}")
+    
+    # 2. Fallback: exact normalised match (avoids substring collisions)
+    if not sid:
+        search_key = f"{int(strike)}_{expiry}_{opt_type.upper()}"
+        sid = instrument_map.get(search_key)
+    
+    # 3. Fallback: try alternate expiry formats in map
+    if not sid:
+        for key, val in instrument_map.items():
+            parts = key.split("_")
+            if (len(parts) == 3
+                    and parts[0] == str(int(strike))
+                    and parts[2] == opt_type.upper()):
+                sid = val
+                log.info(f"[CLIENT] Dhan fallback key matched: {key}")
+                break
+    
+    # 4. If still not found, log and exit
+    if not sid:
+        log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
+        add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "security_id missing")
         return
+    
     resp = dhan.place_order(
-        security_id=sid,
+        security_id=str(sid),
         exchange_segment=dhan.NSE_FNO,
         transaction_type=dhan.BUY if tx == "BUY" else dhan.SELL,
         quantity=acc["quantity"],
@@ -82,6 +106,8 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
         price=0,
     )
     log.info(f"Dhan resp: {resp}")
+    status = "OK" if isinstance(resp, dict) and resp.get("status") == "success" else "FAILED"
+    add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
 
 def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
@@ -106,7 +132,8 @@ def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
     order_data = {
         "variety": "regular", "exchange": "NFO", "tradingsymbol": sym,
         "transaction_type": tx, "quantity": acc["quantity"],
-        "order_type": "MARKET", "product": "NRML", "validity": "DAY", "tag": "TKALGO"
+        "order_type": "MARKET", "product": "NRML", "validity": "DAY", "tag": "TKALGO",
+        "market_protection": -1    # <-- ADD THIS LINE
     }
     r = requests.post("https://api.kite.trade/orders/regular", data=order_data, headers=headers)
     log.info(f"Zerodha resp: {r.status_code} - {r.text}")
