@@ -7,6 +7,8 @@ import requests
 import socketio
 import os
 import tempfile
+import tkinter as tk
+from tkinter import scrolledtext, simpledialog, messagebox
 
 from tkalgo_security import decrypt_payload, get_hwid
 
@@ -14,6 +16,215 @@ MASTER_URL  = "http://198.23.237.249:5050"
 WEBHOOK_URL = "http://198.23.237.249:5000"
 CURRENT_VERSION = "1.0.0"
 
+# ========== TERMS AND CONDITIONS ==========
+TERMS_AND_CONDITIONS = """
+TK ALGO - Terms and Conditions Agreement
+
+By using TK ALGO, you confirm that you have read, understood, and agreed to be legally bound by all clauses herein.
+
+CLAUSE 1 — NATURE OF SERVICE
+TK ALGO is a software automation tool that receives trade signals from GoCharting (a third-party charting platform) and submits orders directly to the Member's registered broker account via the broker's API. TK ALGO acts solely as an execution bridge and does not originate or recommend any trade.
+
+IMPORTANT REGULATORY DISCLAIMER
+- TK ALGO is NOT a SEBI-registered Research Analyst, Investment Adviser, Portfolio Manager, Stock Broker, or Sub-Broker.
+- We do NOT provide financial advice, investment recommendations, or market analysis of any kind.
+- We do NOT guarantee profits, returns, or any specific outcomes.
+- We do NOT manage, pool, or handle Member funds at any point.
+- Signal generation is performed exclusively by GoCharting; TK ALGO has no control over signal accuracy or timing.
+
+CLAUSE 2 — RISK ACKNOWLEDGMENT
+The Member explicitly acknowledges all of the following risks:
+- Trading in equity, futures, and options involves substantial risk of financial loss, including loss of the entire capital invested.
+- Past performance of any strategy, system, or signal does not guarantee or indicate future results.
+- Market conditions, liquidity, and volatility can change rapidly and without notice, adversely affecting execution and outcomes.
+- Automated systems are subject to technical failures including internet outages, broker API errors, server downtime, and software bugs.
+- The Member agrees to never trade with funds they cannot afford to lose entirely. F&O trading is not suitable for all investors.
+- The Member is solely responsible for all trading decisions, positions, and resulting profits or losses.
+
+CLAUSE 3 — LIMITATION OF LIABILITY
+TK ALGO, its founders, directors, employees, agents, and affiliates shall not be liable for any direct, indirect, incidental, consequential, or punitive losses of any nature. This includes trading losses, missed opportunities, loss of data, brokerage penalties, regulatory actions, or any other financial or non-financial harm. Total aggregate liability shall be strictly limited to subscription fees paid by the Member in the three (3) calendar months immediately preceding the event giving rise to the claim. TK ALGO is not responsible for errors or failures originating from GoCharting, broker APIs, third-party services, or network infrastructure.
+
+CLAUSE 4 — INDEMNIFICATION
+The Member agrees to defend, indemnify, and hold harmless TK ALGO and its representatives from all claims, liabilities, damages, costs, and expenses (including reasonable attorneys' fees) arising from: the Member's use or misuse of the TK ALGO System; violation of these Terms or any applicable law or regulation; any trading activity conducted through the Member's broker account; any third-party claims arising from the Member's actions or omissions.
+
+CLAUSE 5 — FEES AND PAYMENT
+All subscription fees are strictly non-refundable under any circumstances, including dissatisfaction with performance, voluntary cancellation, or suspension for breach. The Member is solely responsible for all broker-related costs including brokerage, STT, exchange charges, GST, SEBI turnover fees, and all other applicable taxes. TK ALGO subscription fees do not include any broker-related charges. Fee structures are subject to revision upon 30 days' prior written notice.
+
+CLAUSE 6 — NO GUARANTEE OF UNINTERRUPTED SERVICE
+TK ALGO is provided on an "as-is" and "as-available" basis. Planned or unplanned downtime may occur due to server maintenance, broker API failures, internet disruptions, or force majeure events. TK ALGO shall bear no liability for losses resulting from service interruptions.
+
+CLAUSE 7 — GOVERNING LAW AND DISPUTE RESOLUTION
+This Agreement is governed by the laws of the Republic of India. Any dispute shall be resolved by binding arbitration under the Arbitration and Conciliation Act, 1996. Seat of arbitration: Mumbai, Maharashtra, India. The award shall be final and binding.
+
+CLAUSE 8 — ENTIRE AGREEMENT
+These Terms constitute the entire agreement between the parties and supersede all prior negotiations, representations, warranties, and agreements, whether oral or written, relating to this subject matter.
+
+CLAUSE 9 — AMENDMENTS
+TK ALGO may modify these Terms at any time. Amendments will be communicated via email or the dashboard. Continued use after the effective date of any amendment constitutes the Member's acceptance of the revised Terms.
+
+ACKNOWLEDGMENT & SIGNATURE
+By clicking "I ACCEPT" below, you confirm that you have carefully read, fully understood, and voluntarily agreed to be legally bound by all clauses of this Agreement. You confirm you are 18 years of age or above and legally competent to enter into this Agreement.
+"""
+
+ACCEPTANCE_FILE = "tk_algo_acceptance.json"
+
+def save_acceptance():
+    """Save acceptance record so popup doesn't show again."""
+    data = {
+        "accepted": True,
+        "version": "1.0",
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+    try:
+        with open(ACCEPTANCE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logging.warning(f"Could not save acceptance: {e}")
+
+def has_accepted():
+    """Check if user has already accepted terms."""
+    if os.path.exists(ACCEPTANCE_FILE):
+        try:
+            with open(ACCEPTANCE_FILE, "r") as f:
+                data = json.load(f)
+            return data.get("accepted", False)
+        except:
+            return False
+    return False
+
+def show_terms_and_conditions():
+    """Display T&C popup with scrollable text."""
+    if has_accepted():
+        return True
+
+    root = tk.Tk()
+    root.title("TK ALGO - Terms and Conditions")
+    root.geometry("700x650")
+    root.configure(bg="#1e1e1e")
+    root.attributes('-topmost', True)
+
+    title_label = tk.Label(root, text="TERMS AND CONDITIONS", font=("Arial", 16, "bold"),
+                           fg="#10b981", bg="#1e1e1e", pady=10)
+    title_label.pack()
+
+    text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=80, height=25,
+                                          font=("Consolas", 10), bg="#2d2d2d", fg="#f0f0f0",
+                                          insertbackground="white")
+    text_area.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
+    text_area.insert(tk.INSERT, TERMS_AND_CONDITIONS)
+    text_area.config(state=tk.DISABLED)
+
+    button_frame = tk.Frame(root, bg="#1e1e1e")
+    button_frame.pack(pady=15)
+
+    accept_var = tk.BooleanVar(value=False)
+
+    def on_accept():
+        accept_var.set(True)
+        root.destroy()
+
+    def on_decline():
+        accept_var.set(False)
+        root.destroy()
+
+    accept_btn = tk.Button(button_frame, text="✓ I ACCEPT", command=on_accept,
+                           bg="#10b981", fg="black", font=("Arial", 12, "bold"),
+                           padx=20, pady=5, width=15)
+    accept_btn.pack(side=tk.LEFT, padx=10)
+
+    decline_btn = tk.Button(button_frame, text="✗ DECLINE (Exit)", command=on_decline,
+                            bg="#ef4444", fg="white", font=("Arial", 12, "bold"),
+                            padx=20, pady=5, width=15)
+    decline_btn.pack(side=tk.LEFT, padx=10)
+
+    checkbox_var = tk.BooleanVar()
+    def on_checkbox():
+        accept_btn.config(state=tk.NORMAL if checkbox_var.get() else tk.DISABLED)
+
+    checkbox = tk.Checkbutton(root, text="I have read and agree to the Terms and Conditions",
+                              variable=checkbox_var, command=on_checkbox,
+                              bg="#1e1e1e", fg="#cccccc", selectcolor="#1e1e1e",
+                              font=("Arial", 10))
+    checkbox.pack(pady=5)
+    accept_btn.config(state=tk.DISABLED)
+
+    root.mainloop()
+
+    if accept_var.get():
+        save_acceptance()
+        return True
+    else:
+        return False
+
+# ========== GUI INPUT REPLACEMENTS ==========
+
+def show_local_logs():
+    log_file = "tkalgo_client.log"
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+                # last 50 lines
+                content = "\n".join(lines[-50:]) if lines else "Log is empty."
+                messagebox.showinfo("Client Execution Log (last 50 lines)", content)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read log: {e}")
+    else:
+        messagebox.showinfo("Logs", "No client log file found yet.")
+
+
+gui_root = None
+def show_gui_menu():
+    global gui_root
+    if gui_root is None or not gui_root.winfo_exists():
+        gui_root = tk.Tk()
+        gui_root.title("TK ALGO Client")
+        gui_root.geometry("400x300")
+        gui_root.configure(bg="#1e1e1e")
+        gui_root.attributes('-topmost', True)
+
+        status_label = tk.Label(gui_root, text="Connected. Waiting for signals...", fg="#10b981", bg="#1e1e1e", font=("Arial", 10))
+        status_label.pack(pady=10)
+
+        def update_token():
+            new_token = simpledialog.askstring("Update Token", "Enter new access token:", parent=gui_root)
+            if new_token:
+                sio_client.emit("update_token", {"license_key": _license_key, "access_token": new_token})
+                messagebox.showinfo("Token Update", "Token sent. Waiting for confirmation...")
+
+        def test_signal():
+            sio_client.emit("test_signal", {"license_key": _license_key})
+            messagebox.showinfo("Test Signal", "Test signal sent.")
+
+        def show_logs():
+            def fetch_and_show():
+                try:
+                    r = requests.get(f"{WEBHOOK_URL}/execution_logs", timeout=5)
+                    if r.ok:
+                        logs = r.json().get("logs", [])
+                        log_text = "\n".join([f"{l.get('time','')} {l.get('name','')} {l.get('action','')} {l.get('status','')}" for l in logs[:20]])
+                        messagebox.showinfo("Execution Logs", log_text if log_text else "No logs yet.")
+                    else:
+                        messagebox.showerror("Error", f"HTTP {r.status_code}")
+                except Exception as e:
+                    messagebox.showerror("Error", str(e))
+            threading.Thread(target=fetch_and_show, daemon=True).start()
+
+        def show_status():
+            status = f"Connected: {sio_client.connected}\nUser: {getattr(sio_client, 'auth_name', 'Unknown')}\nLast alert: {getattr(sio_client, 'last_alert_time', 'Never')}"
+            messagebox.showinfo("Status", status)
+
+        btn_frame = tk.Frame(gui_root, bg="#1e1e1e")
+        btn_frame.pack(pady=10)
+
+        tk.Button(btn_frame, text="Update Token", command=update_token, bg="#4d9fff", fg="black", width=15).pack(pady=5)
+        tk.Button(btn_frame, text="View Logs", command=show_local_logs, bg="#888", fg="black", width=15).pack(pady=5)
+        tk.Button(btn_frame, text="Status", command=show_status, bg="#888", fg="black", width=15).pack(pady=5)
+        tk.Button(btn_frame, text="Exit", command=lambda: (sio_client.disconnect(), gui_root.destroy()), bg="#ef4444", fg="white", width=15).pack(pady=5)
+        gui_root.protocol("WM_DELETE_WINDOW", lambda: (sio_client.disconnect(), gui_root.destroy()))
+    gui_root.mainloop()
+
+# ========== EXISTING CODE CONTINUES ==========
 class AsciiStreamHandler(logging.StreamHandler):
     def emit(self, record):
         try:
@@ -68,34 +279,12 @@ def groww_ref_id():
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
     dhan = dhanhq(acc["client_id"], acc["access_token"])
-    
-    # 1. Try direct lookup from payload or instrument_map
     sid = acc.get("security_id")
     if not sid:
-        sid = instrument_map.get(f"{int(strike)}_{expiry}_{opt_type}")
-    
-    # 2. Fallback: exact normalised match (avoids substring collisions)
-    if not sid:
-        search_key = f"{int(strike)}_{expiry}_{opt_type.upper()}"
-        sid = instrument_map.get(search_key)
-    
-    # 3. Fallback: try alternate expiry formats in map
-    if not sid:
-        for key, val in instrument_map.items():
-            parts = key.split("_")
-            if (len(parts) == 3
-                    and parts[0] == str(int(strike))
-                    and parts[2] == opt_type.upper()):
-                sid = val
-                log.info(f"[CLIENT] Dhan fallback key matched: {key}")
-                break
-    
-    # 4. If still not found, log and exit
-    if not sid:
+        # In client mode, instrument_map is not available; assume sid missing is handled by fallback
         log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "security_id missing")
         return
-    
     resp = dhan.place_order(
         security_id=str(sid),
         exchange_segment=dhan.NSE_FNO,
@@ -133,7 +322,7 @@ def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
         "variety": "regular", "exchange": "NFO", "tradingsymbol": sym,
         "transaction_type": tx, "quantity": acc["quantity"],
         "order_type": "MARKET", "product": "NRML", "validity": "DAY", "tag": "TKALGO",
-        "market_protection": -1    # <-- ADD THIS LINE
+        "market_protection": -1
     }
     r = requests.post("https://api.kite.trade/orders/regular", data=order_data, headers=headers)
     log.info(f"Zerodha resp: {r.status_code} - {r.text}")
@@ -278,6 +467,10 @@ BROKER_HANDLERS = {
     "flattrade": place_order_flattrade, "iifl": place_order_iifl,
 }
 
+def add_log(name, action, status, detail=""):
+    # Simple logging function for client-side (not used heavily)
+    log.info(f"{name} | {action} | {status} | {detail}")
+
 def execute_trade(encrypted_payload: str):
     data = decrypt_payload(encrypted_payload, max_age=10.0)
     if "error" in data:
@@ -344,6 +537,8 @@ def on_auth_result(data):
         log.info(f"[OK] Authenticated as: {name}")
         sio_client.auth_name = name
         print("\n[SIGNAL] Connected. Waiting for trade alerts...")
+        # Start GUI menu in a separate thread
+        threading.Thread(target=show_gui_menu, daemon=True).start()
     else:
         log.error(f"[FAIL] Auth rejected: {data.get('reason')}")
         sio_client.disconnect()
@@ -375,51 +570,19 @@ def on_execution_token(data):
 def on_update_token_result(data):
     if data.get("ok"):
         print(f"\n[OK] {data.get('message', 'Token saved.')}")
+        messagebox.showinfo("Token Update", "Token updated successfully!")
     else:
         print(f"\n[FAIL] {data.get('reason', 'Unknown error')}")
+        messagebox.showerror("Token Update", f"Failed: {data.get('reason')}")
 
 @sio_client.on("test_signal_result")
 def on_test_signal_result(data):
     if data.get("ok"):
         print(f"\n[OK] Test signal sent: {data.get('message')}")
+        messagebox.showinfo("Test Signal", "Test signal sent successfully!")
     else:
         print(f"\n[FAIL] Test failed: {data.get('reason')}")
-
-def handle_user_input():
-    menu = "\nOptions: [1] Update Token  [2] Test Signal  [3] Logs  [4] Status"
-    while True:
-        print(menu)
-        cmd = input("> ").strip()
-
-        if cmd in ("1", "token"):
-            new_token = input("Enter new access token: ").strip()
-            if not new_token:
-                print("No token entered.")
-                continue
-            sio_client.emit("update_token", {
-                "license_key": _license_key,
-                "access_token": new_token
-            })
-            print("[OK] Token sent. Waiting for confirmation...")
-
-        elif cmd in ("2", "test"):
-            print("Sending test signal to master...")
-            sio_client.emit("test_signal", {"license_key": _license_key})
-
-        elif cmd in ("3", "logs"):
-            raw = input("How many logs? [default 20]: ").strip()
-            n = int(raw) if raw.isdigit() else 20
-            fetch_execution_logs(n)
-
-        elif cmd in ("4", "status"):
-            print(f"\n{'─'*40}")
-            print(f"  Connected : {sio_client.connected}")
-            print(f"  User      : {getattr(sio_client, 'auth_name', 'Unknown')}")
-            print(f"  Last alert: {getattr(sio_client, 'last_alert_time', 'Never')}")
-            print(f"{'─'*40}")
-
-        else:
-            print("Unknown. Enter 1, 2, 3, or 4.")
+        messagebox.showerror("Test Signal", f"Failed: {data.get('reason')}")
 
 def check_for_updates():
     try:
@@ -435,25 +598,35 @@ def check_for_updates():
     except Exception as e:
         log.debug(f"Update check failed: {e}")
 
+def get_license_key_gui():
+    root = tk.Tk()
+    root.withdraw()
+    license_key = simpledialog.askstring("License Key", "Enter your License Key:", parent=root)
+    root.destroy()
+    return license_key
+
 def main():
+    # Show Terms & Conditions popup
+    if not show_terms_and_conditions():
+        messagebox.showerror("Terms Declined", "You declined the Terms and Conditions. Exiting.")
+        return
+
     global _license_key
     check_for_updates()
-    print("\n" + "=" * 50)
-    print(f"    TK ALGO -- Member Client App v{CURRENT_VERSION}")
-    print("=" * 50)
-    _license_key = input("\nEnter your License Key: ").strip()
+    _license_key = get_license_key_gui()
     if not _license_key:
-        print("No license key entered. Exiting.")
+        messagebox.showerror("Error", "No license key entered. Exiting.")
         return
+
     log.info(f"Connecting to {MASTER_URL} ...")
     try:
         sio_client.connect(MASTER_URL, transports=["websocket"])
-        threading.Thread(target=handle_user_input, daemon=True).start()
         sio_client.wait()
     except KeyboardInterrupt:
         log.info("Shutting down.")
     except Exception as e:
         log.error(f"Connection failed: {e}")
+        messagebox.showerror("Connection Error", f"Failed to connect: {e}")
 
 if __name__ == "__main__":
     main()
