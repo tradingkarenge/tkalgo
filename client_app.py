@@ -9,9 +9,9 @@ import os
 import tempfile
 import sys
 import queue
-import csv          # <-- ADDED for Fyers CSV parser
+import platform
 
-# Try to import tkinter; if it fails, we fall back to console mode
+# Try to import tkinter; if it fails, fall back to console mode
 try:
     import tkinter as tk
     from tkinter import scrolledtext, simpledialog, messagebox
@@ -25,8 +25,8 @@ MASTER_URL  = "http://198.23.237.249:5050"
 WEBHOOK_URL = "http://198.23.237.249:5000"
 CURRENT_VERSION = "1.0.0"
 
-# ========== TERMS AND CONDITIONS ==========
-TERMS_AND_CONDITIONS = """... (keep your full text) ..."""
+# ========== TERMS AND CONDITIONS (full text - keep as before) ==========
+TERMS_AND_CONDITIONS = """... (keep your full T&C text) ..."""
 
 ACCEPTANCE_FILE = "tk_algo_acceptance.json"
 
@@ -36,7 +36,7 @@ def save_acceptance():
         with open(ACCEPTANCE_FILE, "w") as f:
             json.dump(data, f)
     except Exception as e:
-        log.warning(f"Could not save acceptance: {e}")   # fixed
+        log.warning(f"Could not save acceptance: {e}")
 
 def has_accepted():
     if os.path.exists(ACCEPTANCE_FILE):
@@ -49,7 +49,6 @@ def has_accepted():
     return False
 
 def show_terms_and_conditions():
-    """Display T&C popup (main thread). If no Tkinter, use console."""
     if has_accepted():
         return True
     if not TKINTER_AVAILABLE:
@@ -119,7 +118,25 @@ def show_terms_and_conditions():
         return True
     return False
 
-# ========== GUI MENU ==========
+# ========== SINGLE INSTANCE LOCK ==========
+def is_already_running():
+    lock_file = os.path.join(tempfile.gettempdir(), "tk_algo_client.lock")
+    try:
+        if platform.system() == "Windows":
+            global _lock_fd
+            _lock_fd = open(lock_file, 'w')
+            import msvcrt
+            msvcrt.locking(_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            return False
+        else:
+            _lock_fd = open(lock_file, 'w')
+            import fcntl
+            fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+    except (IOError, OSError, ImportError):
+        return True
+
+# ========== GUI MENU (unchanged) ==========
 gui_queue = queue.Queue()
 gui_root = None
 status_label = None
@@ -208,51 +225,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("TKAlgoClient")
 
-# ========== Fyers Instrument Master ==========
-FYERS_INSTRUMENT_URL = "https://api.fyers.in/data/v3/instruments/NSEFO.csv"
-fyers_instrument_map = {}
-fyers_last_update = 0
-
-def update_fyers_instruments():
-    global fyers_instrument_map, fyers_last_update
-    try:
-        log.info("Downloading Fyers instrument master...")
-        r = requests.get(FYERS_INSTRUMENT_URL, timeout=60)
-        if r.status_code != 200:
-            log.error(f"Fyers master download failed: HTTP {r.status_code}")
-            return
-        content = r.content.decode('utf-8')
-        lines = content.splitlines()
-        reader = csv.DictReader(lines)
-        new_map = {}
-        count = 0
-        for row in reader:
-            if row.get('underlying') == 'NIFTY' and row.get('instrument_type') in ('CE', 'PE'):
-                expiry_raw = row.get('expiry', '')[:10]
-                strike = row.get('strike', '')
-                opt_type = row.get('instrument_type', '')
-                if expiry_raw and strike and opt_type:
-                    try:
-                        strike_int = int(float(strike))
-                        key = f"{expiry_raw}_{strike_int}_{opt_type}"
-                        new_map[key] = row['symbol']
-                        count += 1
-                    except:
-                        pass
-        if new_map:
-            fyers_instrument_map = new_map
-            fyers_last_update = time.time()
-            log.info(f"Fyers instrument map updated: {count} NIFTY options")
-        else:
-            log.warning("Fyers CSV contained no NIFTY FNO entries")
-    except Exception as e:
-        log.error(f"Failed to update Fyers instruments: {e}")
-
-def get_fyers_symbol(expiry, strike, opt_type):
-    key = f"{expiry}_{int(strike)}_{opt_type.upper()}"
-    return fyers_instrument_map.get(key)
-
-# ========== Broker helpers ==========
+# ========== BROKER HELPERS ==========
 def fyers_app_id(acc):
     return acc.get("api_key", "").strip()
 
@@ -271,38 +244,14 @@ def fyers_model(acc):
         log_path=tempfile.gettempdir()
     )
 
-_GROWW_MONTHS_3 = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-
-def build_groww_symbol(strike, opt_type, expiry_str):
-    """Fallback symbol builder using correct Groww format."""
-    try:
-        d = datetime.datetime.strptime(expiry_str, "%Y-%m-%d")
-        dd = f"{d.day:02d}"
-        mmm = _GROWW_MONTHS_3[d.month - 1]
-        yy = str(d.year)[-2:]
-        st = int(strike)
-        return f"NSE-NIFTY-{dd}{mmm}{yy}-{st}-{opt_type.upper()}"
-    except Exception as e:
-        log.error(f"[GROWW] fallback symbol error: {e}")
-        return None
-
-def groww_ref_id():
-    return f"TK{int(time.time() * 1000) % 10_000_000_000:010d}"
-
-def _groww_headers(acc):
-    return {
-        "Authorization": f"Bearer {acc['access_token'].strip()}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-API-VERSION": "1.0",
-    }
-
-# ========== Place order functions ==========
-def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
+# ------------------------------------------------------------
+# PLACE ORDER FUNCTIONS (using pre‑resolved tokens from broker_tokens)
+# ------------------------------------------------------------
+def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
     from dhanhq import dhanhq
-    # Correct constructor: dhanhq(access_token) – client_id is inferred from token or not required
+    # Fix: dhanhq constructor expects only access_token
     dhan = dhanhq(acc["access_token"])
-    sid = acc.get("security_id")
+    sid = broker_tokens.get("dhan") if broker_tokens else acc.get("security_id")
     if not sid:
         log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "security_id missing")
@@ -321,22 +270,26 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
 
-def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
+def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
     from kiteconnect import KiteConnect
     kite = KiteConnect(api_key=acc["api_key"])
     kite.set_access_token(acc["access_token"])
-    expiry_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
-    instruments = kite.instruments("NFO")
     sym = None
-    for inst in instruments:
-        if (inst["instrument_type"] == opt_type and
-                inst["strike"] == int(strike) and
-                inst["expiry"] == expiry_date and
-                inst["name"] == "NIFTY"):
-            sym = inst["tradingsymbol"]
-            break
+    if broker_tokens and broker_tokens.get("zerodha"):
+        sym = broker_tokens["zerodha"]
+    else:
+        expiry_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
+        instruments = kite.instruments("NFO")
+        for inst in instruments:
+            if (inst["instrument_type"] == opt_type and
+                    inst["strike"] == int(strike) and
+                    inst["expiry"] == expiry_date and
+                    inst["name"] == "NIFTY"):
+                sym = inst["tradingsymbol"]
+                break
     if not sym:
         log.error(f"Zerodha: instrument not found for strike {strike}")
+        add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "instrument not found")
         return
     headers = {"X-Kite-Version": "3",
                "Authorization": f"token {acc['api_key']}:{acc['access_token']}"}
@@ -347,17 +300,20 @@ def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
         "market_protection": -1
     }
     r = requests.post("https://api.kite.trade/orders/regular", data=order_data, headers=headers)
-    log.info(f"Zerodha resp: {r.status_code} - {r.text}")
+    status = "OK" if r.status_code == 200 else "FAILED"
+    add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, r.text[:200])
+    return r.json() if r.text else {}
 
-def place_order_angel(acc, tx, strike, opt_type, ltp, expiry):
+def place_order_angel(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
     from SmartApi import SmartConnect
     smart = SmartConnect(api_key=acc["api_key"])
     smart.access_token = acc["access_token"]
     d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
     symbol = f"NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
-    token = acc.get("symbol_token")
+    token = broker_tokens.get("angel") if broker_tokens else acc.get("symbol_token")
     if not token:
-        log.error("Angel: symbol_token missing")
+        log.error(f"Angel: symbol_token missing for {symbol}")
+        add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "symbol_token missing")
         return
     resp = smart.placeOrder({
         "variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token,
@@ -365,14 +321,16 @@ def place_order_angel(acc, tx, strike, opt_type, ltp, expiry):
         "producttype": "INTRADAY", "duration": "DAY",
         "price": "0", "quantity": str(acc["quantity"]),
     })
-    log.info(f"Angel resp: {resp}")
+    status = "OK" if isinstance(resp, dict) and resp.get("status") else "FAILED"
+    add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
 
-def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry):
+def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
     import upstox_client
-    inst_key = acc.get("instrument_token")
+    inst_key = broker_tokens.get("upstox") if broker_tokens else acc.get("instrument_token")
     if not inst_key:
-        log.error("Upstox: instrument_token missing")
+        log.error(f"Upstox: instrument_token missing for {strike} {opt_type} {expiry}")
+        add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "instrument_token missing")
         return
     cfg = upstox_client.Configuration()
     cfg.access_token = acc["access_token"]
@@ -384,10 +342,10 @@ def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry):
         disclosed_quantity=0, trigger_price=0, is_amo=False
     )
     resp = api.place_order(body, "2.0")
-    log.info(f"Upstox resp: {resp}")
+    add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "OK", str(resp)[:200])
     return resp
 
-def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
+def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=None):
     try:
         app_id = fyers_app_id(acc)
         if not app_id:
@@ -396,14 +354,13 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
             add_log(acc["name"], action, "FAILED", msg)
             return
 
-        # Look up symbol from instrument map
-        sym = get_fyers_symbol(expiry, strike, opt_type)
+        sym = broker_tokens.get("fyers") if broker_tokens else None
         if not sym:
-            # Fallback with correct month abbreviation
+            # Fallback – should not happen if server sends correct token
             d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
             month_abbr = d.strftime("%b").upper()
             sym = f"NSE:NIFTY{d.strftime('%y')}{month_abbr}{d.strftime('%d')}{int(strike)}{opt_type.upper()}"
-            log.warning(f"[{acc['name']}] Symbol not in map, using fallback: {sym}")
+            log.warning(f"[{acc['name']}] No broker token for Fyers, using fallback: {sym}")
 
         log.info(f"[{acc['name']}] Fyers {action} | sym={sym} | qty={acc['quantity']}")
 
@@ -411,7 +368,7 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
         data = {
             "symbol": sym,
             "qty": acc["quantity"],
-            "type": 1,                     # MARKET order
+            "type": 1,
             "side": 1 if action == "BUY" else -1,
             "productType": "INTRADAY",
             "limitPrice": 0,
@@ -447,7 +404,7 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
         log.error(f"[{acc['name']}] Fyers FAILED | {e}")
         add_log(acc["name"], action, "ERROR", str(e)[:200])
 
-def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
+def place_order_groww(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
     name = acc.get("name", "unknown")
     log.info(f"[GROWW] {name} | {tx} {opt_type}{strike} | expiry={expiry}")
 
@@ -456,11 +413,16 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
         return {}
 
-    # Build symbol directly (no map for Groww, rely on fallback)
-    sym = build_groww_symbol(strike, opt_type, expiry)
+    sym = broker_tokens.get("groww") if broker_tokens else None
     if not sym:
-        add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "Cannot build symbol")
-        return {}
+        # Fallback – should not happen; build a symbol as last resort
+        d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
+        dd = d.strftime("%d")
+        mmm = d.strftime("%b").upper()
+        yy = d.strftime("%y")
+        strike_padded = f"{int(strike):05d}"
+        sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{strike_padded}-{opt_type.upper()}"
+        log.warning(f"[GROWW] {name}: No broker token, using fallback: {sym}")
 
     log.info(f"[GROWW] {name} | Symbol={sym} | Qty={acc['quantity']}")
 
@@ -475,11 +437,16 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         "product": "MIS",
         "order_type": "MARKET",
         "transaction_type": tx.upper(),
-        "order_reference_id": groww_ref_id(),
+        "order_reference_id": f"TK{int(time.time())%10000}",
     }
-
+    headers = {
+        "Authorization": f"Bearer {acc['access_token'].strip()}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-API-VERSION": "1.0",
+    }
     try:
-        resp = requests.post("https://api.groww.in/v1/order/create", json=payload, headers=_groww_headers(acc), timeout=10)
+        resp = requests.post("https://api.groww.in/v1/order/create", json=payload, headers=headers, timeout=10)
         log.info(f"[GROWW] {name} | HTTP {resp.status_code} | {resp.text[:200]}")
         if resp.status_code == 200:
             add_log(name, f"{tx} {opt_type}{strike}", "OK", f"sym={sym}")
@@ -492,22 +459,27 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", str(e)[:200])
         return {}
 
-# Dummy handlers for unused brokers
-def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry):
-    log.warning("Kotak not fully implemented")
-def place_order_aliceblue(acc, tx, strike, opt_type, ltp, expiry):
-    log.warning("AliceBlue not fully implemented")
-def place_order_flattrade(acc, tx, strike, opt_type, ltp, expiry):
-    log.warning("FlatTrade not fully implemented")
-def place_order_iifl(acc, tx, strike, opt_type, ltp, expiry):
-    log.warning("IIFL not fully implemented")
+# Dummy handlers for unsupported brokers
+def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+    log.warning("Kotak not implemented")
+def place_order_aliceblue(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+    log.warning("AliceBlue not implemented")
+def place_order_flattrade(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+    log.warning("FlatTrade not implemented")
+def place_order_iifl(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+    log.warning("IIFL not implemented")
 
 BROKER_HANDLERS = {
-    "dhan": place_order_dhan, "zerodha": place_order_zerodha,
-    "angel": place_order_angel, "upstox": place_order_upstox,
-    "fyers": place_order_fyers, "groww": place_order_groww,
-    "kotak": place_order_kotak, "aliceblue": place_order_aliceblue,
-    "flattrade": place_order_flattrade, "iifl": place_order_iifl,
+    "dhan": place_order_dhan,
+    "zerodha": place_order_zerodha,
+    "angel": place_order_angel,
+    "upstox": place_order_upstox,
+    "fyers": place_order_fyers,
+    "groww": place_order_groww,
+    "kotak": place_order_kotak,
+    "aliceblue": place_order_aliceblue,
+    "flattrade": place_order_flattrade,
+    "iifl": place_order_iifl,
 }
 
 def add_log(name, action, status, detail=""):
@@ -525,13 +497,14 @@ def execute_trade(encrypted_payload: str):
     expiry = data.get("expiry", "")
     ltp    = float(data.get("ltp", 0))
     broker = acc.get("broker", "").lower().strip()
-    log.info(f"[EXECUTE] {action} {opt}{strike} @ {ltp} | broker={broker}")
+    broker_tokens = data.get("broker_tokens", {})   # <-- NEW: receive pre‑resolved tokens
+    log.info(f"[EXECUTE] {action} {opt}{strike} @ {ltp} | broker={broker} | tokens={list(broker_tokens.keys())}")
     handler = BROKER_HANDLERS.get(broker)
     if not handler:
         log.error(f"Unknown broker in payload: '{broker}'")
         return
     try:
-        handler(acc, action, strike, opt, ltp, expiry)
+        handler(acc, action, strike, opt, ltp, expiry, broker_tokens)
     except Exception as err:
         log.error(f"Trade execution error [{broker}]: {err}")
     finally:
@@ -563,7 +536,7 @@ _license_key = ""
 
 @sio_client.event
 def connect():
-    log.info(f"Connected to Master. Authenticating...")
+    log.info("Connected to Master. Authenticating...")
     sio_client.emit("auth", {"license_key": _license_key, "hwid": "none"})
 
 @sio_client.event
@@ -653,10 +626,12 @@ def get_license_key_gui():
     return license_key
 
 def main():
-    # Load Fyers instrument map at startup
-    update_fyers_instruments()
+    if is_already_running():
+        print("TK ALGO Client is already running. Exiting.")
+        if TKINTER_AVAILABLE:
+            messagebox.showerror("Already Running", "Another instance is already running.")
+        return
 
-    # Terms & Conditions
     if not show_terms_and_conditions():
         if TKINTER_AVAILABLE:
             messagebox.showerror("Terms Declined", "You declined the Terms and Conditions. Exiting.")
@@ -664,7 +639,6 @@ def main():
             print("You declined the Terms and Conditions. Exiting.")
         return
 
-    # GUI menu
     if TKINTER_AVAILABLE:
         gui = create_gui_menu()
         console_mode = gui is None
