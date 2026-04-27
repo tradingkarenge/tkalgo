@@ -245,13 +245,13 @@ def fyers_model(acc):
     )
 
 # ------------------------------------------------------------
-# PLACE ORDER FUNCTIONS (broker_tokens optional, fallback to account fields)
+# PLACE ORDER FUNCTIONS (no broker_tokens, only account fields)
 # ------------------------------------------------------------
-def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
-    # FIX: Use two‑argument constructor (client_id, access_token)
+    # Two‑argument constructor (client_id, access_token)
     dhan = dhanhq(acc["client_id"], acc["access_token"])
-    sid = broker_tokens.get("dhan") if broker_tokens else acc.get("security_id")
+    sid = acc.get("security_id")
     if not sid:
         log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "security_id missing")
@@ -270,23 +270,20 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None)
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
 
-def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
     from kiteconnect import KiteConnect
     kite = KiteConnect(api_key=acc["api_key"])
     kite.set_access_token(acc["access_token"])
+    expiry_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
+    instruments = kite.instruments("NFO")
     sym = None
-    if broker_tokens and broker_tokens.get("zerodha"):
-        sym = broker_tokens["zerodha"]
-    else:
-        expiry_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
-        instruments = kite.instruments("NFO")
-        for inst in instruments:
-            if (inst["instrument_type"] == opt_type and
-                    inst["strike"] == int(strike) and
-                    inst["expiry"] == expiry_date and
-                    inst["name"] == "NIFTY"):
-                sym = inst["tradingsymbol"]
-                break
+    for inst in instruments:
+        if (inst["instrument_type"] == opt_type and
+                inst["strike"] == int(strike) and
+                inst["expiry"] == expiry_date and
+                inst["name"] == "NIFTY"):
+            sym = inst["tradingsymbol"]
+            break
     if not sym:
         log.error(f"Zerodha: instrument not found for strike {strike}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "instrument not found")
@@ -304,13 +301,13 @@ def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=No
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, r.text[:200])
     return r.json() if r.text else {}
 
-def place_order_angel(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_angel(acc, tx, strike, opt_type, ltp, expiry):
     from SmartApi import SmartConnect
     smart = SmartConnect(api_key=acc["api_key"])
     smart.access_token = acc["access_token"]
     d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
     symbol = f"NIFTY{d.strftime('%d%b%y').upper()}{int(strike)}{opt_type}"
-    token = broker_tokens.get("angel") if broker_tokens else acc.get("symbol_token")
+    token = acc.get("symbol_token")
     if not token:
         log.error(f"Angel: symbol_token missing for {symbol}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "symbol_token missing")
@@ -325,9 +322,9 @@ def place_order_angel(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
 
-def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry):
     import upstox_client
-    inst_key = broker_tokens.get("upstox") if broker_tokens else acc.get("instrument_token")
+    inst_key = acc.get("instrument_token")
     if not inst_key:
         log.error(f"Upstox: instrument_token missing for {strike} {opt_type} {expiry}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "instrument_token missing")
@@ -345,8 +342,8 @@ def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=Non
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "OK", str(resp)[:200])
     return resp
 
-# Fyers: always use fallback symbol builder (no broker_tokens needed)
-def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=None):
+# Fyers: always build symbol from expiry (no map, no token)
+def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
     try:
         app_id = fyers_app_id(acc)
         if not app_id:
@@ -368,7 +365,7 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=
             "type": 1,                     # MARKET order
             "side": 1 if action == "BUY" else -1,
             "productType": "INTRADAY",
-            "limitPrice": 0.0025,
+            "limitPrice": 0.0025,          # Minimum required for market orders
             "stopPrice": 0,
             "validity": "DAY",
             "disclosedQty": 0,
@@ -401,7 +398,7 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=
         log.error(f"[{acc['name']}] Fyers FAILED | {e}")
         add_log(acc["name"], action, "ERROR", str(e)[:200])
 
-def place_order_groww(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     name = acc.get("name", "unknown")
     log.info(f"[GROWW] {name} | {tx} {opt_type}{strike} | expiry={expiry}")
 
@@ -410,7 +407,7 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
         return {}
 
-    # Build symbol directly (no broker_tokens used)
+    # Build symbol directly
     d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
     dd = d.strftime("%d")
     mmm = d.strftime("%b").upper()
@@ -453,13 +450,13 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None
         return {}
 
 # Dummy handlers for unsupported brokers
-def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry):
     log.warning("Kotak not implemented")
-def place_order_aliceblue(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_aliceblue(acc, tx, strike, opt_type, ltp, expiry):
     log.warning("AliceBlue not implemented")
-def place_order_flattrade(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_flattrade(acc, tx, strike, opt_type, ltp, expiry):
     log.warning("FlatTrade not implemented")
-def place_order_iifl(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
+def place_order_iifl(acc, tx, strike, opt_type, ltp, expiry):
     log.warning("IIFL not implemented")
 
 BROKER_HANDLERS = {
@@ -490,14 +487,13 @@ def execute_trade(encrypted_payload: str):
     expiry = data.get("expiry", "")
     ltp    = float(data.get("ltp", 0))
     broker = acc.get("broker", "").lower().strip()
-    broker_tokens = data.get("broker_tokens", {})  # may be empty, that's fine
-    log.info(f"[EXECUTE] {action} {opt}{strike} @ {ltp} | broker={broker} | tokens={list(broker_tokens.keys())}")
+    log.info(f"[EXECUTE] {action} {opt}{strike} @ {ltp} | broker={broker}")
     handler = BROKER_HANDLERS.get(broker)
     if not handler:
         log.error(f"Unknown broker in payload: '{broker}'")
         return
     try:
-        handler(acc, action, strike, opt, ltp, expiry, broker_tokens)
+        handler(acc, action, strike, opt, ltp, expiry)
     except Exception as err:
         log.error(f"Trade execution error [{broker}]: {err}")
     finally:
