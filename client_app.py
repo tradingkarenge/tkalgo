@@ -25,7 +25,7 @@ MASTER_URL  = "http://198.23.237.249:5050"
 WEBHOOK_URL = "http://198.23.237.249:5000"
 CURRENT_VERSION = "1.0.0"
 
-# ========== TERMS AND CONDITIONS (full text - keep as before) ==========
+# ========== TERMS AND CONDITIONS (keep your full T&C text) ==========
 TERMS_AND_CONDITIONS = """... (keep your full T&C text) ..."""
 
 ACCEPTANCE_FILE = "tk_algo_acceptance.json"
@@ -136,7 +136,7 @@ def is_already_running():
     except (IOError, OSError, ImportError):
         return True
 
-# ========== GUI MENU (unchanged) ==========
+# ========== GUI MENU ==========
 gui_queue = queue.Queue()
 gui_root = None
 status_label = None
@@ -245,12 +245,12 @@ def fyers_model(acc):
     )
 
 # ------------------------------------------------------------
-# PLACE ORDER FUNCTIONS (using pre‑resolved tokens from broker_tokens)
+# PLACE ORDER FUNCTIONS (broker_tokens optional, fallback to account fields)
 # ------------------------------------------------------------
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None):
     from dhanhq import dhanhq
-    # Fix: dhanhq constructor expects only access_token
-    dhan = dhanhq(acc["access_token"])
+    # FIX: Use two‑argument constructor (client_id, access_token)
+    dhan = dhanhq(acc["client_id"], acc["access_token"])
     sid = broker_tokens.get("dhan") if broker_tokens else acc.get("security_id")
     if not sid:
         log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
@@ -345,6 +345,7 @@ def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=Non
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "OK", str(resp)[:200])
     return resp
 
+# Fyers: always use fallback symbol builder (no broker_tokens needed)
 def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=None):
     try:
         app_id = fyers_app_id(acc)
@@ -354,24 +355,20 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=
             add_log(acc["name"], action, "FAILED", msg)
             return
 
-        sym = broker_tokens.get("fyers") if broker_tokens else None
-        if not sym:
-            # Fallback – should not happen if server sends correct token
-            d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-            month_abbr = d.strftime("%b").upper()
-            sym = f"NSE:NIFTY{d.strftime('%y')}{month_abbr}{d.strftime('%d')}{int(strike)}{opt_type.upper()}"
-            log.warning(f"[{acc['name']}] No broker token for Fyers, using fallback: {sym}")
-
+        # Build symbol from expiry (fallback, no map)
+        d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
+        month_abbr = d.strftime("%b").upper()
+        sym = f"NSE:NIFTY{d.strftime('%y')}{month_abbr}{d.strftime('%d')}{int(strike)}{opt_type.upper()}"
         log.info(f"[{acc['name']}] Fyers {action} | sym={sym} | qty={acc['quantity']}")
 
         fy = fyers_model(acc)
         data = {
             "symbol": sym,
             "qty": acc["quantity"],
-            "type": 1,                         # 1 = MARKET order
+            "type": 1,                     # MARKET order
             "side": 1 if action == "BUY" else -1,
             "productType": "INTRADAY",
-            "limitPrice": 0.0025,              # Minimum allowed by Fyers
+            "limitPrice": 0.0025,
             "stopPrice": 0,
             "validity": "DAY",
             "disclosedQty": 0,
@@ -413,17 +410,13 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry, broker_tokens=None
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
         return {}
 
-    sym = broker_tokens.get("groww") if broker_tokens else None
-    if not sym:
-        # Fallback – should not happen; build a symbol as last resort
-        d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-        dd = d.strftime("%d")
-        mmm = d.strftime("%b").upper()
-        yy = d.strftime("%y")
-        strike_padded = f"{int(strike):05d}"
-        sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{strike_padded}-{opt_type.upper()}"
-        log.warning(f"[GROWW] {name}: No broker token, using fallback: {sym}")
-
+    # Build symbol directly (no broker_tokens used)
+    d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
+    dd = d.strftime("%d")
+    mmm = d.strftime("%b").upper()
+    yy = d.strftime("%y")
+    strike_padded = f"{int(strike):05d}"
+    sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{strike_padded}-{opt_type.upper()}"
     log.info(f"[GROWW] {name} | Symbol={sym} | Qty={acc['quantity']}")
 
     payload = {
@@ -497,7 +490,7 @@ def execute_trade(encrypted_payload: str):
     expiry = data.get("expiry", "")
     ltp    = float(data.get("ltp", 0))
     broker = acc.get("broker", "").lower().strip()
-    broker_tokens = data.get("broker_tokens", {})   # <-- NEW: receive pre‑resolved tokens
+    broker_tokens = data.get("broker_tokens", {})  # may be empty, that's fine
     log.info(f"[EXECUTE] {action} {opt}{strike} @ {ltp} | broker={broker} | tokens={list(broker_tokens.keys())}")
     handler = BROKER_HANDLERS.get(broker)
     if not handler:
