@@ -249,7 +249,16 @@ def fyers_model(acc):
 # ------------------------------------------------------------
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
-    # Two‑argument constructor (client_id, access_token)
+    # dhanhq v2.x: constructor only takes access_token
+    # dhanhq v1.x: constructor takes (client_id, access_token)
+    try:
+        dhan = dhanhq(access_token=acc["access_token"], client_id=acc["client_id"])
+    except TypeError:
+        try:
+            dhan = dhanhq(acc["access_token"])
+            dhan.client_id = acc["client_id"]
+        except TypeError:
+            dhan = dhanhq(acc["client_id"], acc["access_token"])
     dhan = dhanhq(acc["client_id"], acc["access_token"])
     sid = acc.get("security_id")
     if not sid:
