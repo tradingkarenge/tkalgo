@@ -300,7 +300,8 @@ def _groww_headers(acc):
 # ========== Place order functions ==========
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
-    dhan = dhanhq(acc["client_id"], acc["access_token"])
+    # Correct constructor: dhanhq(access_token) – client_id is inferred from token or not required
+    dhan = dhanhq(acc["access_token"])
     sid = acc.get("security_id")
     if not sid:
         log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
