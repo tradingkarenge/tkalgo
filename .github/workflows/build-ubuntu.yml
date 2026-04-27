@@ -1,4 +1,4 @@
-name: Build Ubuntu Executable
+name: Build Obfuscated Ubuntu Executable
 
 on:
   workflow_dispatch:
@@ -11,9 +11,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install pyinstaller
-      - run: pyinstaller --onefile --name tkalgo_client client_app.py
+
+      - name: Install PyArmor & PyInstaller
+        run: |
+          pip install pyarmor pyinstaller
+
+      - name: Obfuscate scripts (makes them unreadable)
+        run: |
+          pyarmor gen client_app.py tkalgo_security.py
+
+      - name: Build executable from obfuscated code
+        run: |
+          cd dist
+          pyinstaller --onefile --name tkalgo_client \
+            --hidden-import=json \
+            --hidden-import=tkinter \
+            --hidden-import=os \
+            --hidden-import=sys \
+            client_app.py
+
       - uses: actions/upload-artifact@v4
         with:
-          name: tkalgo-ubuntu
-          path: dist/tkalgo_client
+          name: tkalgo-ubuntu-obfuscated
+          path: dist/dist/tkalgo_client
