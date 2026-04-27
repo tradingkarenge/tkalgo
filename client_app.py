@@ -368,10 +368,10 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry, broker_tokens=
         data = {
             "symbol": sym,
             "qty": acc["quantity"],
-            "type": 1,
+            "type": 1,                         # 1 = MARKET order
             "side": 1 if action == "BUY" else -1,
             "productType": "INTRADAY",
-            "limitPrice": 0,
+            "limitPrice": 0.0025,              # Minimum allowed by Fyers
             "stopPrice": 0,
             "validity": "DAY",
             "disclosedQty": 0,
