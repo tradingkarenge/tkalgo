@@ -1,0 +1,19 @@
+name: Build Ubuntu Executable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller
+      - run: pyinstaller --onefile --name tkalgo_client client_app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tkalgo-ubuntu
+          path: dist/tkalgo_client
