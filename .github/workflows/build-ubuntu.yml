@@ -1,40 +1,44 @@
-name: Build Obfuscated Executables
+name: Build Obfuscated Ubuntu Executable
 
 on:
-  workflow_dispatch:
-  push:
+  workflow_dispatch:    # manual trigger (you click "Run workflow")
+  push:                 # optional: also runs when you push to main
     branches: [ main ]
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]   # add windows-latest if needed
-    runs-on: ${{ matrix.os }}
+  build-ubuntu:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install PyArmor & PyInstaller
-        run: pip install pyarmor pyinstaller
+      - name: Install PyArmor and PyInstaller
+        run: |
+          pip install pyarmor pyinstaller --break-system-packages
 
       - name: Obfuscate scripts (makes them unreadable)
         run: pyarmor gen client_app.py tkalgo_security.py
 
-      - name: Build executable from obfuscated code
+      - name: Build Linux executable
         run: |
           cd dist
-          pyinstaller --onefile --name tkalgo_client \
+          pyinstaller --onefile --name newtkalgo \
+            --hidden-import=requests \
             --hidden-import=json \
             --hidden-import=tkinter \
             --hidden-import=os \
             --hidden-import=sys \
+            --hidden-import=time \
+            --hidden-import=threading \
+            --hidden-import=socketio \
+            --hidden-import=engineio \
+            --hidden-import=tkalgo_security \
             client_app.py
 
-      - name: Upload artifact
+      - name: Upload artifact (the final executable)
         uses: actions/upload-artifact@v4
         with:
-          name: tkalgo-${{ runner.os }}
-          path: dist/dist/tkalgo_client
+          name: newtkalgo-ubuntu
+          path: dist/dist/newtkalgo
