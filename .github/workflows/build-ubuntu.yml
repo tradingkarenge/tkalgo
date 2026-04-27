@@ -1,11 +1,16 @@
-name: Build Obfuscated Ubuntu Executable
+name: Build Obfuscated Executables
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
-  build-ubuntu:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]   # add windows-latest if needed
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -13,12 +18,10 @@ jobs:
           python-version: '3.12'
 
       - name: Install PyArmor & PyInstaller
-        run: |
-          pip install pyarmor pyinstaller
+        run: pip install pyarmor pyinstaller
 
       - name: Obfuscate scripts (makes them unreadable)
-        run: |
-          pyarmor gen client_app.py tkalgo_security.py
+        run: pyarmor gen client_app.py tkalgo_security.py
 
       - name: Build executable from obfuscated code
         run: |
@@ -30,7 +33,8 @@ jobs:
             --hidden-import=sys \
             client_app.py
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: tkalgo-ubuntu-obfuscated
+          name: tkalgo-${{ runner.os }}
           path: dist/dist/tkalgo_client
