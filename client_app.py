@@ -230,6 +230,11 @@ def fyers_model(acc):
         log_path=tempfile.gettempdir()
     )
 
+_GROWW_MONTHS_3 = [
+    "JAN","FEB","MAR","APR","MAY","JUN",
+    "JUL","AUG","SEP","OCT","NOV","DEC"
+]
+
 def build_groww_symbol(strike, opt_type, expiry_str=None):
     """Fallback symbol builder using correct Groww format: NSE-NIFTY-{DDMMMYY}-{STRIKE}-{TYPE}"""
     try:
@@ -256,6 +261,7 @@ def _groww_headers(acc):
         "Accept":        "application/json",
         "X-API-VERSION": "1.0",
     }
+
 
 
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
@@ -346,67 +352,20 @@ def place_order_upstox(acc, tx, strike, opt_type, ltp, expiry):
     log.info(f"Upstox resp: {resp}")
     return resp
 
-def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
-    """
-    Place order on Fyers.
-    action: "BUY" or "SELL"
-    expiry: date string in YYYY-MM-DD format
-    """
-    try:
-        app_id = fyers_app_id(acc)
-        if not app_id:
-            msg = "Fyers: api_key (App ID) missing - set e.g. VKM29D0SPE-200 in api_key field"
-            log.error(f"[{acc['name']}] {msg}")
-            add_log(acc["name"], action, "FAILED", msg)
-            return
-
-        # Parse expiry date and generate correct symbol
-        d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-        # 3-letter month abbreviation (e.g., APR)
-        month_abbr = d.strftime("%b").upper()
-        # Symbol: NSE:NIFTY{YY}{MMM}{DD}{STRIKE}{CE/PE}
-        sym = f"NSE:NIFTY{d.strftime('%y')}{month_abbr}{d.strftime('%d')}{int(strike)}{opt_type.upper()}"
-        log.info(f"[{acc['name']}] Fyers {action} | app_id={app_id} | sym={sym}")
-
-        fy = fyers_model(acc)
-        data = {
-            "symbol": sym,
-            "qty": acc["quantity"],
-            "type": 1,                     # 1 = MARKET order
-            "side": 1 if action == "BUY" else -1,
-            "productType": "INTRADAY",
-            "limitPrice": 0,
-            "stopPrice": 0,
-            "validity": "DAY",
-            "disclosedQty": 0,
-            "offlineOrder": False
-        }
-        resp = fy.place_order(data=data)
-        log.info(f"[{acc['name']}] Fyers RESP | {resp}")
-
-        if not isinstance(resp, dict):
-            add_log(acc["name"], action, "ERROR", f"unexpected: {resp}")
-            return
-
-        s = resp.get("s", "")
-        code = resp.get("code", "")
-        if s == "ok":
-            add_log(acc["name"], action, "OK", f"order={resp.get('id', '')}")
-        elif code in (-16, "-16"):
-            msg = "Fyers -16: token EXPIRED - regenerate daily token at Fyers API dashboard"
-            log.error(f"[{acc['name']}] {msg}")
-            add_log(acc["name"], action, "FAILED", msg)
-        elif code in (-7, "-7"):
-            msg = "Fyers -7: bad token format - api_key must be App ID like VKM29D0SPE-200"
-            log.error(f"[{acc['name']}] {msg}")
-            add_log(acc["name"], action, "FAILED", msg)
-        else:
-            msg = f"Fyers s={s} code={code} | {resp.get('message', '')}"
-            log.error(f"[{acc['name']}] {msg}")
-            add_log(acc["name"], action, "ERROR", msg[:200])
-    except Exception as e:
-        log.error(f"[{acc['name']}] Fyers FAILED | {e}")
-        add_log(acc["name"], action, "ERROR", str(e)[:200])
+def place_order_fyers(acc, tx, strike, opt_type, ltp, expiry):
+    fy = fyers_model(acc)
+    d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
+    sym = f"NSE:NIFTY{d.strftime('%y')}{d.month}{d.strftime('%d')}{int(strike)}{opt_type}"
+    data = {
+        "symbol": sym, "qty": acc["quantity"], "type": 2,
+        "side": 1 if tx == "BUY" else -1, "productType": "INTRADAY",
+        "limitPrice": 0, "stopPrice": 0, "validity": "DAY",
+        "disclosedQty": 0, "offlineOrder": False
+    }
+    resp = fy.place_order(data=data)
+    status = "OK" if isinstance(resp, dict) and resp.get("s") == "ok" else "FAILED"
+    add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
+    return resp
 
 def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     name = acc.get("name", "unknown")
