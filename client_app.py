@@ -24,6 +24,10 @@ from tkalgo_security import decrypt_payload   # removed get_hwid
 MASTER_URL  = "http://198.23.237.249:5050"
 WEBHOOK_URL = "http://198.23.237.249:5000"
 CURRENT_VERSION = "1.0.0"
+# Groww instrument map: key = "NIFTY_{expiry}_{strike}_{CE/PE}" -> trading_symbol
+groww_instrument_map = {}
+groww_last_update = 0
+
 
 # ========== TERMS AND CONDITIONS (keep your full T&C text) ==========
 TERMS_AND_CONDITIONS = """... (keep your full T&C text) ..."""
@@ -135,6 +139,80 @@ def is_already_running():
             return False
     except (IOError, OSError, ImportError):
         return True
+
+
+_GROWW_MONTHS_3 = [
+    "JAN","FEB","MAR","APR","MAY","JUN",
+    "JUL","AUG","SEP","OCT","NOV","DEC"
+]
+
+def build_groww_symbol(strike, opt_type, expiry_str=None):
+    """Fallback symbol builder using correct Groww format: NSE-NIFTY-{DDMMMYY}-{STRIKE}-{TYPE}"""
+    try:
+        date_str = expiry_str or EXPIRY_DATE
+        d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        dd = f"{d.day:02d}"
+        mmm = _GROWW_MONTHS_3[d.month - 1]
+        yy = str(d.year)[-2:]
+        st = int(strike)
+        sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{st}-{opt_type.upper()}"
+        return sym
+    except Exception as e:
+        log.error(f"[GROWW] fallback symbol error: {e}")
+        return None
+
+def groww_ref_id():
+    """Unique reference ID for each Groww order."""
+    return f"TK{int(time.time() * 1000) % 10_000_000_000:010d}"
+
+def _groww_headers(acc):
+    return {
+        "Authorization": f"Bearer {acc['access_token'].strip()}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
+        "X-API-VERSION": "1.0",
+    }
+
+def update_groww_instruments():
+    """Download Groww instrument CSV and build trading_symbol map."""
+    global groww_instrument_map, groww_last_update
+    try:
+        url = "https://growwapi-assets.groww.in/instruments/instrument.csv"
+        log.info("Downloading Groww instrument CSV...")
+        r = _http_session.get(url, timeout=60)
+        if r.status_code != 200:
+            log.error(f"Groww CSV download failed: HTTP {r.status_code}")
+            return
+        content = r.content.decode('utf-8')
+        new_map = {}
+        lines = content.splitlines()
+        reader = csv.DictReader(lines)
+        count = 0
+        for row in reader:
+            # Filter for NIFTY FNO contracts
+            if row.get('segment') == 'FNO' and row.get('underlying_symbol') == 'NIFTY':
+                expiry = row.get('expiry_date', '')[:10]   # YYYY-MM-DD
+                strike_raw = row.get('strike_price', '')
+                opt_type = row.get('instrument_type', '')
+                if expiry and strike_raw and opt_type in ('CE', 'PE'):
+                    try:
+                        strike = int(float(strike_raw))
+                        key = f"NIFTY_{expiry}_{strike}_{opt_type}"
+                        new_map[key] = row['trading_symbol']
+                        count += 1
+                    except:
+                        pass
+        if new_map:
+            groww_instrument_map = new_map
+            groww_last_update = time.time()
+            log.info(f"Groww instrument map updated: {count} NIFTY options")
+        else:
+            log.warning("Groww CSV contained no NIFTY FNO entries")
+    except Exception as e:
+        log.error(f"Failed to update Groww instruments: {e}")
+
+def _reload_all():
+    update_groww_instruments() 
 
 # ========== GUI MENU ==========
 gui_queue = queue.Queue()
@@ -469,14 +547,30 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     token = acc.get("access_token", "").strip()
     if not token:
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
+        log.error(f"[GROWW] {name}: access_token is empty")
         return {}
 
-    sym = build_groww_symbol(strike, opt_type, expiry)
+    # 1. Try to get trading_symbol from instrument map
+    key = f"NIFTY_{expiry}_{int(strike)}_{opt_type.upper()}"
+    sym = groww_instrument_map.get(key)
     if not sym:
-        add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "Cannot build symbol")
-        return {}
+        # 2. Fallback to manual builder
+        sym = build_groww_symbol(strike, opt_type, expiry)
+        if not sym:
+            add_log(name, f"{tx} {opt_type}{strike}", "FAILED",
+                    f"Cannot build symbol: strike={strike} expiry={expiry}")
+            return {}
+        log.warning(f"[GROWW] {name}: Using fallback symbol {sym} (not found in instrument map)")
 
     log.info(f"[GROWW] {name} | Symbol={sym} | Qty={acc['quantity']}")
+
+    try:
+        exp_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
+        weekday = exp_date.weekday()
+        if weekday not in (1, 3):
+            log.warning(f"[GROWW] Expiry {expiry} is {exp_date.strftime('%A')} - not standard NSE expiry day")
+    except Exception:
+        pass
 
     payload = {
         "trading_symbol": sym,
@@ -489,25 +583,83 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         "product": "MIS",
         "order_type": "MARKET",
         "transaction_type": tx.upper(),
-        "order_reference_id": f"TK{int(time.time() * 1000) % 10_000_000_000:010d}",
+        "order_reference_id": groww_ref_id(),
     }
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-API-VERSION": "1.0",
-    }
+
     try:
-        resp = requests.post("https://api.groww.in/v1/order/create", json=payload, headers=headers, timeout=10)
-        log.info(f"[GROWW] {name} | HTTP {resp.status_code} | {resp.text[:200]}")
+        resp = requests.post(
+            "https://api.groww.in/v1/order/create",
+            json=payload,
+            headers=_groww_headers(acc),
+            timeout=12,
+        )
+        raw = resp.text[:500]
+        log.info(f"[GROWW] {name} | HTTP {resp.status_code} | {raw}")
+
+        rj = {}
+        try:
+            rj = resp.json()
+        except Exception:
+            pass
+
         if resp.status_code == 200:
-            add_log(name, f"{tx} {opt_type}{strike}", "OK", f"sym={sym}")
-            return resp.json() if resp.text else {}
-        else:
-            add_log(name, f"{tx} {opt_type}{strike}", "FAILED", f"HTTP {resp.status_code}: {resp.text[:100]}")
+            order_id = ""
+            try:
+                order_id = (rj.get("payload") or {}).get("orderId", "")
+            except Exception:
+                pass
+            add_log(name, f"{tx} {opt_type}{strike}", "OK", f"sym={sym} orderId={order_id}")
+            return rj
+
+        elif resp.status_code == 400:
+            err_obj = rj.get("error") or {} if isinstance(rj, dict) else {}
+            err_code = err_obj.get("code", "?") if isinstance(err_obj, dict) else "?"
+            err_msg = err_obj.get("message", raw) if isinstance(err_obj, dict) else raw
+            hint = ""
+            if err_code == "GA001":
+                hint = f"Invalid symbol '{sym}'. Check expiry date ({expiry}) and strike {int(strike)}."
+            elif err_code == "GA002":
+                hint = f"Insufficient funds for {acc['quantity']} lots."
+            elif err_code == "GA003":
+                hint = "Market is closed or outside trading hours."
+            else:
+                hint = err_msg
+            log.error(f"[GROWW] {name}: 400 {err_code} | {hint}")
+            add_log(name, f"{tx} {opt_type}{strike}", "FAILED", f"400 {err_code}: {hint[:200]}")
+            return rj
+
+        elif resp.status_code == 401:
+            log.error(f"[GROWW] {name}: 401 Unauthorized - token expired")
+            add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "Token expired (401)")
             return {}
+
+        elif resp.status_code == 429:
+            log.warning(f"[GROWW] {name}: 429 Rate limited. Retrying after 2s...")
+            time.sleep(2)
+            resp2 = requests.post(
+                "https://api.groww.in/v1/order/create",
+                json=payload,
+                headers=_groww_headers(acc),
+                timeout=12,
+            )
+            if resp2.status_code == 200:
+                rj2 = resp2.json() if resp2.text else {}
+                add_log(name, f"{tx} {opt_type}{strike}", "OK", f"sym={sym} (retry OK)")
+                return rj2
+            add_log(name, f"{tx} {opt_type}{strike}", "FAILED", f"Rate limited; retry HTTP {resp2.status_code}")
+            return {}
+
+        else:
+            log.error(f"[GROWW] {name}: HTTP {resp.status_code} | {raw}")
+            add_log(name, f"{tx} {opt_type}{strike}", "FAILED", f"HTTP {resp.status_code}: {raw[:150]}")
+            return rj
+
+    except requests.Timeout:
+        log.error(f"[GROWW] {name}: request timeout (12s)")
+        add_log(name, f"{tx} {opt_type}{strike}", "TIMEOUT", "Groww API did not respond within 12s")
+        return {}
     except Exception as e:
-        log.error(f"[GROWW] {name}: {e}")
+        log.error(f"[GROWW] {name}: exception: {e}")
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", str(e)[:200])
         return {}
 
