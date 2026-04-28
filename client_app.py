@@ -249,8 +249,6 @@ def fyers_model(acc):
 # ------------------------------------------------------------
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
-    # dhanhq v2.x: constructor only takes access_token
-    # dhanhq v1.x: constructor takes (client_id, access_token)
     try:
         dhan = dhanhq(access_token=acc["access_token"], client_id=acc["client_id"])
     except TypeError:
@@ -259,10 +257,15 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
             dhan.client_id = acc["client_id"]
         except TypeError:
             dhan = dhanhq(acc["client_id"], acc["access_token"])
-    dhan = dhanhq(acc["client_id"], acc["access_token"])
-    sid = acc.get("security_id")
+    sid = acc.get("security_id") or instrument_map.get(f"{int(strike)}_{expiry}_{opt_type}")
     if not sid:
-        log.error(f"Dhan: security_id missing for {strike} {opt_type} {expiry}")
+        for key, val in instrument_map.items():
+            parts = key.split("_")
+            if len(parts) == 3 and parts[0] == str(int(strike)) and parts[2] == opt_type.upper():
+                sid = val
+                break
+    if not sid:
+        log.error(f"[SERVER] Dhan: security_id missing for {strike} {opt_type} {expiry}")
         add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "security_id missing")
         return
     resp = dhan.place_order(
@@ -274,10 +277,10 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
         product_type=dhan.INTRA,
         price=0,
     )
-    log.info(f"Dhan resp: {resp}")
     status = "OK" if isinstance(resp, dict) and resp.get("status") == "success" else "FAILED"
     add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
+
 
 def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
     from kiteconnect import KiteConnect
