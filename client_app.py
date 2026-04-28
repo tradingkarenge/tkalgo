@@ -452,16 +452,30 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     token = acc.get("access_token", "").strip()
     if not token:
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
+        log.error(f"[GROWW] {name}: access_token is empty")
         return {}
 
-    # Build symbol directly
-    d = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-    dd = d.strftime("%d")
-    mmm = d.strftime("%b").upper()
-    yy = d.strftime("%y")
-    strike_padded = f"{int(strike):05d}"
-    sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{strike_padded}-{opt_type.upper()}"
+    # 1. Try to get trading_symbol from instrument map
+    key = f"NIFTY_{expiry}_{int(strike)}_{opt_type.upper()}"
+    sym = groww_instrument_map.get(key)
+    if not sym:
+        # 2. Fallback to manual builder
+        sym = build_groww_symbol(strike, opt_type, expiry)
+        if not sym:
+            add_log(name, f"{tx} {opt_type}{strike}", "FAILED",
+                    f"Cannot build symbol: strike={strike} expiry={expiry}")
+            return {}
+        log.warning(f"[GROWW] {name}: Using fallback symbol {sym} (not found in instrument map)")
+
     log.info(f"[GROWW] {name} | Symbol={sym} | Qty={acc['quantity']}")
+
+    try:
+        exp_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
+        weekday = exp_date.weekday()
+        if weekday not in (1, 3):
+            log.warning(f"[GROWW] Expiry {expiry} is {exp_date.strftime('%A')} - not standard NSE expiry day")
+    except Exception:
+        pass
 
     payload = {
         "trading_symbol": sym,
