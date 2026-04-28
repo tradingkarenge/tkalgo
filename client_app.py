@@ -10,6 +10,7 @@ import tempfile
 import sys
 import queue
 import platform
+import csv
 
 # Try to import tkinter; if it fails, fall back to console mode
 try:
@@ -24,6 +25,9 @@ from tkalgo_security import decrypt_payload   # removed get_hwid
 MASTER_URL  = "http://198.23.237.249:5050"
 WEBHOOK_URL = "http://198.23.237.249:5000"
 CURRENT_VERSION = "1.0.0"
+
+_http_session = requests.Session()
+
 # Groww instrument map: key = "NIFTY_{expiry}_{strike}_{CE/PE}" -> trading_symbol
 groww_instrument_map = {}
 groww_last_update = 0
@@ -149,8 +153,7 @@ _GROWW_MONTHS_3 = [
 def build_groww_symbol(strike, opt_type, expiry_str=None):
     """Fallback symbol builder using correct Groww format: NSE-NIFTY-{DDMMMYY}-{STRIKE}-{TYPE}"""
     try:
-        date_str = expiry_str or EXPIRY_DATE
-        d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        d = datetime.datetime.strptime(expiry_str, "%Y-%m-%d")
         dd = f"{d.day:02d}"
         mmm = _GROWW_MONTHS_3[d.month - 1]
         yy = str(d.year)[-2:]
@@ -160,6 +163,7 @@ def build_groww_symbol(strike, opt_type, expiry_str=None):
     except Exception as e:
         log.error(f"[GROWW] fallback symbol error: {e}")
         return None
+
 
 def groww_ref_id():
     """Unique reference ID for each Groww order."""
@@ -173,13 +177,14 @@ def _groww_headers(acc):
         "X-API-VERSION": "1.0",
     }
 
+groww_instruments_ready = False
+
 def update_groww_instruments():
-    """Download Groww instrument CSV and build trading_symbol map."""
-    global groww_instrument_map, groww_last_update
+    global groww_instrument_map, groww_last_update, groww_instruments_ready
     try:
         url = "https://growwapi-assets.groww.in/instruments/instrument.csv"
         log.info("Downloading Groww instrument CSV...")
-        r = _http_session.get(url, timeout=60)
+        r = requests.get(url, timeout=60)
         if r.status_code != 200:
             log.error(f"Groww CSV download failed: HTTP {r.status_code}")
             return
@@ -205,6 +210,7 @@ def update_groww_instruments():
         if new_map:
             groww_instrument_map = new_map
             groww_last_update = time.time()
+            groww_instruments_ready = True
             log.info(f"Groww instrument map updated: {count} NIFTY options")
         else:
             log.warning("Groww CSV contained no NIFTY FNO entries")
@@ -212,7 +218,7 @@ def update_groww_instruments():
         log.error(f"Failed to update Groww instruments: {e}")
 
 def _reload_all():
-    update_groww_instruments() 
+    update_groww_instruments()
 
 # ========== GUI MENU ==========
 gui_queue = queue.Queue()
@@ -524,22 +530,6 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
         add_log(acc["name"], action, "ERROR", str(e)[:200])
 
 
-_GROWW_MONTHS_3 = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-
-def build_groww_symbol(strike, opt_type, expiry_str):
-    """Build Groww trading symbol directly from expiry date, strike and option type."""
-    try:
-        d = datetime.datetime.strptime(expiry_str, "%Y-%m-%d")
-        dd = f"{d.day:02d}"
-        mmm = _GROWW_MONTHS_3[d.month - 1]
-        yy = str(d.year)[-2:]
-        st = int(strike)
-        sym = f"NIFTY{dd}{mmm}{yy}{st}{opt_type.upper()}"
-        return sym
-    except Exception as e:
-        log.error(f"[GROWW] build_groww_symbol error: {e}")
-        return None
-
 def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     name = acc.get("name", "unknown")
     log.info(f"[GROWW] {name} | {tx} {opt_type}{strike} | expiry={expiry}")
@@ -741,6 +731,7 @@ _license_key = ""
 def connect():
     log.info("Connected to Master. Authenticating...")
     sio_client.emit("auth", {"license_key": _license_key, "hwid": "none"})
+    threading.Thread(target=_reload_all, daemon=True).start()
 
 @sio_client.event
 def disconnect():
@@ -755,6 +746,7 @@ def on_auth_result(data):
         sio_client.auth_name = name
         print("\n[SIGNAL] Connected. Waiting for trade alerts...")
         gui_queue.put(("status", f"Connected as {name}"))
+        threading.Thread(target=update_groww_instruments, daemon=True).start()  # ← add this
     else:
         log.error(f"[FAIL] Auth rejected: {data.get('reason')}")
         sio_client.disconnect()
