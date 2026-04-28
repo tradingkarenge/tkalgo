@@ -456,7 +456,7 @@ def build_groww_symbol(strike, opt_type, expiry_str):
         mmm = _GROWW_MONTHS_3[d.month - 1]
         yy = str(d.year)[-2:]
         st = int(strike)
-        sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{st}-{opt_type.upper()}"
+        sym = f"NIFTY{dd}{mmm}{yy}{st}{opt_type.upper()}"
         return sym
     except Exception as e:
         log.error(f"[GROWW] build_groww_symbol error: {e}")
@@ -471,7 +471,6 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
         return {}
 
-    # Build symbol directly (no map)
     sym = build_groww_symbol(strike, opt_type, expiry)
     if not sym:
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "Cannot build symbol")
@@ -490,7 +489,7 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         "product": "MIS",
         "order_type": "MARKET",
         "transaction_type": tx.upper(),
-        "order_reference_id": f"TK{int(time.time())%10000}",
+        "order_reference_id": f"TK{int(time.time() * 1000) % 10_000_000_000:010d}",
     }
     headers = {
         "Authorization": f"Bearer {token}",
@@ -511,7 +510,6 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         log.error(f"[GROWW] {name}: {e}")
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", str(e)[:200])
         return {}
-
 
 # Dummy handlers for unsupported brokers
 def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry):
