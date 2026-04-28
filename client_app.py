@@ -445,6 +445,23 @@ def place_order_fyers(acc, action, strike, opt_type, ltp, expiry):
         log.error(f"[{acc['name']}] Fyers FAILED | {e}")
         add_log(acc["name"], action, "ERROR", str(e)[:200])
 
+
+_GROWW_MONTHS_3 = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+
+def build_groww_symbol(strike, opt_type, expiry_str):
+    """Build Groww trading symbol directly from expiry date, strike and option type."""
+    try:
+        d = datetime.datetime.strptime(expiry_str, "%Y-%m-%d")
+        dd = f"{d.day:02d}"
+        mmm = _GROWW_MONTHS_3[d.month - 1]
+        yy = str(d.year)[-2:]
+        st = int(strike)
+        sym = f"NSE-NIFTY-{dd}{mmm}{yy}-{st}-{opt_type.upper()}"
+        return sym
+    except Exception as e:
+        log.error(f"[GROWW] build_groww_symbol error: {e}")
+        return None
+
 def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     name = acc.get("name", "unknown")
     log.info(f"[GROWW] {name} | {tx} {opt_type}{strike} | expiry={expiry}")
@@ -452,30 +469,15 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
     token = acc.get("access_token", "").strip()
     if not token:
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "No Groww access_token")
-        log.error(f"[GROWW] {name}: access_token is empty")
         return {}
 
-    # 1. Try to get trading_symbol from instrument map
-    key = f"NIFTY_{expiry}_{int(strike)}_{opt_type.upper()}"
-    sym = groww_instrument_map.get(key)
+    # Build symbol directly (no map)
+    sym = build_groww_symbol(strike, opt_type, expiry)
     if not sym:
-        # 2. Fallback to manual builder
-        sym = build_groww_symbol(strike, opt_type, expiry)
-        if not sym:
-            add_log(name, f"{tx} {opt_type}{strike}", "FAILED",
-                    f"Cannot build symbol: strike={strike} expiry={expiry}")
-            return {}
-        log.warning(f"[GROWW] {name}: Using fallback symbol {sym} (not found in instrument map)")
+        add_log(name, f"{tx} {opt_type}{strike}", "FAILED", "Cannot build symbol")
+        return {}
 
     log.info(f"[GROWW] {name} | Symbol={sym} | Qty={acc['quantity']}")
-
-    try:
-        exp_date = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
-        weekday = exp_date.weekday()
-        if weekday not in (1, 3):
-            log.warning(f"[GROWW] Expiry {expiry} is {exp_date.strftime('%A')} - not standard NSE expiry day")
-    except Exception:
-        pass
 
     payload = {
         "trading_symbol": sym,
@@ -491,7 +493,7 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         "order_reference_id": f"TK{int(time.time())%10000}",
     }
     headers = {
-        "Authorization": f"Bearer {acc['access_token'].strip()}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "X-API-VERSION": "1.0",
@@ -509,6 +511,7 @@ def place_order_groww(acc, tx, strike, opt_type, ltp, expiry):
         log.error(f"[GROWW] {name}: {e}")
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", str(e)[:200])
         return {}
+
 
 # Dummy handlers for unsupported brokers
 def place_order_kotak(acc, tx, strike, opt_type, ltp, expiry):
