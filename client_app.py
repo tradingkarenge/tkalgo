@@ -249,6 +249,9 @@ def fyers_model(acc):
 # ------------------------------------------------------------
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
     from dhanhq import dhanhq
+    name = acc.get("name", "unknown")
+
+    # ── Step 1: Build dhanhq client ───────────────────────────────────
     try:
         dhan = dhanhq(access_token=acc["access_token"], client_id=acc["client_id"])
     except TypeError:
@@ -257,28 +260,60 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
             dhan.client_id = acc["client_id"]
         except TypeError:
             dhan = dhanhq(acc["client_id"], acc["access_token"])
-    sid = acc.get("security_id") or instrument_map.get(f"{int(strike)}_{expiry}_{opt_type}")
+
+    # ── Step 2: Resolve security_id ───────────────────────────────────
+
+    # Level 1: from decrypted payload (sent by server via bridge)
+    sid = str(acc.get("security_id", "")).strip()
+    if sid and sid not in ("None", "0", ""):
+        log.info(f"[DHAN] {name}: sid from payload = {sid}")
+    else:
+        sid = ""
+
+    # Level 2: live Dhan OC API (client calls with own token)
     if not sid:
-        for key, val in instrument_map.items():
-            parts = key.split("_")
-            if len(parts) == 3 and parts[0] == str(int(strike)) and parts[2] == opt_type.upper():
-                sid = val
-                break
+        log.warning(f"[DHAN] {name}: security_id missing in payload. "
+                    f"Calling live OC API | {strike}{opt_type} exp={expiry}")
+        sid = _client_dhan_lookup_sid(
+            strike, opt_type, expiry,
+            acc["access_token"], acc["client_id"]
+        )
+
     if not sid:
-        log.error(f"[SERVER] Dhan: security_id missing for {strike} {opt_type} {expiry}")
-        add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", "FAILED", "security_id missing")
-        return
-    resp = dhan.place_order(
-        security_id=str(sid),
-        exchange_segment=dhan.NSE_FNO,
-        transaction_type=dhan.BUY if tx == "BUY" else dhan.SELL,
-        quantity=acc["quantity"],
-        order_type=dhan.MARKET,
-        product_type=dhan.INTRA,
-        price=0,
-    )
+        msg = (f"security_id not found for {strike}{opt_type} exp={expiry}. "
+               f"Server may have stale EXPIRY_DATE. Contact admin.")
+        log.error(f"[DHAN] {name}: {msg}")
+        add_log(name, f"{tx} {opt_type}{strike}", "FAILED", msg)
+        return None
+
+    # ── Step 3: Place order ───────────────────────────────────────────
+    log.info(f"[DHAN] {name}: {tx} {opt_type}{strike} | sid={sid} | "
+             f"qty={acc['quantity']} | expiry={expiry}")
+    try:
+        resp = dhan.place_order(
+            security_id      = str(sid),
+            exchange_segment = dhan.NSE_FNO,
+            transaction_type = dhan.BUY if tx == "BUY" else dhan.SELL,
+            quantity         = acc["quantity"],
+            order_type       = dhan.MARKET,
+            product_type     = dhan.INTRA,
+            price            = 0,
+        )
+    except Exception as e:
+        log.error(f"[DHAN] {name}: place_order exception: {e}")
+        add_log(name, f"{tx} {opt_type}{strike}", "FAILED", str(e)[:200])
+        return None
+
+    log.info(f"[DHAN] {name}: resp = {resp}")
     status = "OK" if isinstance(resp, dict) and resp.get("status") == "success" else "FAILED"
-    add_log(acc.get("name", ""), f"{tx} {opt_type}{strike}", status, str(resp)[:200])
+    if status == "FAILED":
+        err_code = ""
+        try:
+            err_code = (resp.get("remarks", {}) or {}).get("error_code", "")
+        except Exception:
+            pass
+        log.error(f"[DHAN] {name}: FAILED | error_code={err_code} | {resp}")
+    add_log(name, f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
 
 
@@ -659,27 +694,33 @@ def main():
     log.info(f"Connecting to {MASTER_URL} ...")
     try:
         sio_client.connect(MASTER_URL, transports=["websocket"])
+
         if console_mode:
-            def console_menu():
-                while True:
-                    print("\nOptions: [1] Update Token  [2] Test Signal  [3] Logs  [4] Status  [5] Exit")
-                    cmd = input("> ").strip()
-                    if cmd == "1":
-                        new_token = input("Enter new access token: ").strip()
-                        if new_token:
-                            sio_client.emit("update_token", {"license_key": _license_key, "access_token": new_token})
-                    elif cmd == "2":
-                        sio_client.emit("test_signal", {"license_key": _license_key})
-                    elif cmd == "3":
-                        fetch_execution_logs()
-                    elif cmd == "4":
-                        print(f"Connected: {sio_client.connected}")
-                        print(f"User: {getattr(sio_client, 'auth_name', 'Unknown')}")
-                        print(f"Last alert: {getattr(sio_client, 'last_alert_time', 'Never')}")
-                    elif cmd == "5":
-                        sio_client.disconnect()
-                        sys.exit(0)
-            threading.Thread(target=console_menu, daemon=True).start()
+            # Run console menu in the main thread, no daemon threads
+            while True:
+                print("\nOptions: [1] Update Token  [2] Test Signal  [3] Logs  [4] Status  [5] Exit")
+                cmd = input("> ").strip()
+                if cmd == "1":
+                    new_token = input("Enter new access token: ").strip()
+                    if new_token:
+                        sio_client.emit("update_token", {"license_key": _license_key, "access_token": new_token})
+                elif cmd == "2":
+                    sio_client.emit("test_signal", {"license_key": _license_key})
+                    print("Test signal sent. Waiting for response...")
+                    # Give the socketio client a moment to process the response
+                    for _ in range(10):
+                        sio_client.sleep(0.1)
+                elif cmd == "3":
+                    fetch_execution_logs()
+                elif cmd == "4":
+                    print(f"Connected: {sio_client.connected}")
+                    print(f"User: {getattr(sio_client, 'auth_name', 'Unknown')}")
+                    print(f"Last alert: {getattr(sio_client, 'last_alert_time', 'Never')}")
+                elif cmd == "5":
+                    sio_client.disconnect()
+                    sys.exit(0)
+                # Allow socketio client to process incoming events (like trade alerts)
+                sio_client.sleep(0.05)
         elif gui:
             gui.mainloop()
         else:
