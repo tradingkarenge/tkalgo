@@ -332,21 +332,9 @@ def fyers_model(acc):
 # PLACE ORDER FUNCTIONS (no broker_tokens, only account fields)
 # ------------------------------------------------------------
 def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
-    from dhanhq import dhanhq
     name = acc.get("name", "unknown")
 
-    # ── Step 1: Build dhanhq client ───────────────────────────────────
-    try:
-        dhan = dhanhq(access_token=acc["access_token"], client_id=acc["client_id"])
-    except TypeError:
-        try:
-            dhan = dhanhq(acc["access_token"])
-            dhan.client_id = acc["client_id"]
-        except TypeError:
-            dhan = dhanhq(acc["client_id"], acc["access_token"])
-
-    # ── Step 2: Resolve security_id ───────────────────────────────────
-
+    # ── Step 1: Resolve security_id ───────────────────────────────────
     # Level 1: from decrypted payload (sent by server via bridge)
     sid = str(acc.get("security_id", "")).strip()
     if sid and sid not in ("None", "0", ""):
@@ -370,35 +358,49 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", msg)
         return None
 
-    # ── Step 3: Place order ───────────────────────────────────────────
+    # ── Step 2: Place order via direct API ────────────────────────────
     log.info(f"[DHAN] {name}: {tx} {opt_type}{strike} | sid={sid} | "
              f"qty={acc['quantity']} | expiry={expiry}")
+    
+    url = "https://api.dhan.co/v2/orders"
+    headers = {
+        "access-token": str(acc["access_token"]).strip(),
+        "client-id": str(acc["client_id"]).strip(),
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "dhanClientId": str(acc["client_id"]).strip(),
+        "transactionType": "BUY" if tx == "BUY" else "SELL",
+        "exchangeSegment": "NSE_FNO",
+        "productType": "INTRA",
+        "orderType": "MARKET",
+        "validity": "DAY",
+        "securityId": str(sid),
+        "quantity": int(acc["quantity"]),
+        "disclosedQuantity": 0,
+        "price": 0.0,
+        "afterMarketOrder": False
+    }
+
     try:
-        resp = dhan.place_order(
-            security_id      = str(sid),
-            exchange_segment = dhan.NSE_FNO,
-            transaction_type = dhan.BUY if tx == "BUY" else dhan.SELL,
-            quantity         = acc["quantity"],
-            order_type       = dhan.MARKET,
-            product_type     = dhan.INTRA,
-            price            = 0,
-        )
+        r = _http_session.post(url, json=payload, headers=headers, timeout=10, allow_redirects=False)
+        resp = r.json() if r.text else {}
     except Exception as e:
         log.error(f"[DHAN] {name}: place_order exception: {e}")
         add_log(name, f"{tx} {opt_type}{strike}", "FAILED", str(e)[:200])
         return None
 
     log.info(f"[DHAN] {name}: resp = {resp}")
-    status = "OK" if isinstance(resp, dict) and resp.get("status") == "success" else "FAILED"
+    # Dhan API returns either {"orderId": "..."} or {"errorType": "...", "errorMessage": "..."}
+    status = "OK" if isinstance(resp, dict) and "orderId" in resp else "FAILED"
     if status == "FAILED":
-        err_code = ""
-        try:
-            err_code = (resp.get("remarks", {}) or {}).get("error_code", "")
-        except Exception:
-            pass
+        err_code = resp.get("errorCode", "") if isinstance(resp, dict) else ""
         log.error(f"[DHAN] {name}: FAILED | error_code={err_code} | {resp}")
+    
     add_log(name, f"{tx} {opt_type}{strike}", status, str(resp)[:200])
     return resp
+
 
 
 def place_order_zerodha(acc, tx, strike, opt_type, ltp, expiry):
