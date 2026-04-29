@@ -373,7 +373,7 @@ def place_order_dhan(acc, tx, strike, opt_type, ltp, expiry):
         "dhanClientId": str(acc["client_id"]).strip(),
         "transactionType": "BUY" if tx == "BUY" else "SELL",
         "exchangeSegment": "NSE_FNO",
-        "productType": "INTRA",
+        "productType": "INTRADAY",
         "orderType": "MARKET",
         "validity": "DAY",
         "securityId": str(sid),
